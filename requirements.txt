@@ -1,0 +1,8 @@
+yfinance
+py_vollib
+pandas
+numpy
+scipy
+pandas_market_calendars
+pytz
+streamlit
