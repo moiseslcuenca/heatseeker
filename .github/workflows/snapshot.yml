@@ -1,0 +1,39 @@
+name: HeatSeeker Snapshot
+
+on:
+  schedule:
+    # Every 15 min, 13:30-20:00 UTC (9:30am-4:00pm ET), Mon-Fri.
+    # market_hours.py double-checks holidays/exact open-close, so it's
+    # fine that this window is a bit loose.
+    - cron: "*/15 13-19 * * 1-5"
+    - cron: "0,15,30 20 * * 1-5"
+  workflow_dispatch: {}  # lets you manually trigger a run from the Actions tab to test
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run snapshot
+        run: python run_snapshot.py
+
+      - name: Commit and push data
+        run: |
+          git config user.name "heatseeker-bot"
+          git config user.email "actions@github.com"
+          git add data
+          git diff --staged --quiet || git commit -m "Snapshot $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
