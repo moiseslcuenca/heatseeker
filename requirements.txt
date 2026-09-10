@@ -6,3 +6,4 @@ scipy
 pandas_market_calendars
 pytz
 streamlit
+requests
