@@ -155,3 +155,26 @@ def extract_nodes(df, current_price, bin_size=5, top_n=None):
             nodes["GEX"].abs().sort_values(ascending=False).index[:top_n]
         ).sort_index()
     return nodes
+
+
+def extract_matrix(df, current_price, mode="GEX", bin_size=5, zoom_range=None):
+    """
+    Strike x Expiration matrix (rows=strike_bin, cols=expirationDate), summed
+    over the chosen greek. This is what feeds the heatmap view, matching the
+    original notebook's plot_heatseeker().
+
+    zoom_range: optional (low, high) strike bounds; defaults to a window
+    around current_price sized off bin_size, same as the notebook.
+    """
+    df_plot = df.copy()
+    df_plot["strike_bin"] = (df_plot["strike"] / bin_size).round() * bin_size
+    matrix = df_plot.groupby(["strike_bin", "expirationDate"])[mode].sum().unstack()
+    matrix = matrix.reindex(sorted(matrix.columns), axis=1)
+
+    if zoom_range is None:
+        r = max(8 * bin_size, 4.0)
+        zoom_range = (current_price - r, current_price + r)
+    zoomed = matrix.loc[(matrix.index >= zoom_range[0]) & (matrix.index <= zoom_range[1])]
+    if zoomed.empty:
+        zoomed = matrix
+    return zoomed.sort_index(ascending=False)  # descending strikes, spot near top
