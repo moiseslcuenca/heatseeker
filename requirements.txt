@@ -8,3 +8,5 @@ pytz
 streamlit
 requests
 plotly
+matplotlib
+Jinja2
