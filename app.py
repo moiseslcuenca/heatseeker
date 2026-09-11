@@ -36,6 +36,13 @@ def load_latest():
         return json.load(f)
 
 
+def color_pct(val):
+    if val is None or pd.isna(val):
+        return ""
+    color = "#00C853" if val > 0 else "#FF3131" if val < 0 else "white"
+    return f"color: {color}; font-weight: bold"
+
+
 def gradient_style(df, cols):
     """Diverging red/green background, centered at 0, matching the heatmap."""
     styler = df.style
