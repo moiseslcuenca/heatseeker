@@ -1,7 +1,24 @@
 {
   "tickers": [
-    {"ticker": "SPY", "bin_size": 5, "mode": "daily"},
-    {"ticker": "QQQ", "bin_size": 5, "mode": "daily"},
-    {"ticker": "APP", "bin_size": 1, "mode": "daily"}
+    {
+      "ticker": "SPY",
+      "bin_size": 5,
+      "mode": "daily"
+    },
+    {
+      "ticker": "QQQ",
+      "bin_size": 5,
+      "mode": "daily"
+    },
+    {
+      "ticker": "APP",
+      "bin_size": 1,
+      "mode": "daily"
+    },
+    {
+      "ticker": "CRWV",
+      "bin_size": 1.0,
+      "mode": "daily"
+    }
   ]
 }
