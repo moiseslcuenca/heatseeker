@@ -1,13 +1,14 @@
 """
 heatseeker/app.py
 
-Streamlit dashboard. Reads data/latest.json (committed by the GitHub Actions
-job) and shows, per ticker, each node's GEX/VEX plus % change vs 15 min ago
-and vs yesterday's close.
-
-To run locally:  streamlit run app.py
-On Streamlit Cloud: point the app at this file; it auto-redeploys whenever
-the repo updates, which happens every 15 min thanks to the Actions commit.
+Streamlit dashboard.
+- "Tracked Watchlist" tab: reads data/latest.json (written by GitHub Actions
+  every 15 min during market hours), shows the 15m/1d % change table for the
+  aggregated node.
+- "Look Up Any Ticker" tab: live on-demand fetch for any symbol, with a full
+  GEX heatmap (strike x expiration, matching the notebook's style) and a
+  button to add it to the tracked watchlist (writes to tickers.json in the
+  GitHub repo via the API; the scheduled job picks it up next run).
 """
 
 import base64
@@ -15,10 +16,11 @@ import json
 import os
 
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-from core import fetch_heatseeker_data, extract_nodes
+from core import fetch_heatseeker_data, extract_nodes, extract_matrix
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "latest.json")
 GITHUB_API = "https://api.github.com"
@@ -55,13 +57,96 @@ def fmt_money(x):
     return f"{sign}${a:.0f}"
 
 
-# --- GitHub write-back: adds a ticker to tickers.json in the repo ---
+def fmt_money_short(x):
+    if x is None or pd.isna(x):
+        return ""
+    a = abs(x)
+    sign = "-" if x < 0 else ""
+    if a >= 1e6:
+        return f"{sign}${a/1e6:.1f}M"
+    if a >= 1e3:
+        return f"{sign}${a/1e3:.0f}K"
+    return f"{sign}${a:.0f}"
+
+
+def render_heatmap(matrix, spot, title):
+    """
+    matrix: DataFrame, index=strike (descending), columns=expiration dates,
+    values=GEX. Renders a Plotly heatmap: diverging color scale, king node
+    (max positive / max negative) starred.
+    """
+    if matrix.empty:
+        st.info("Not enough data to draw a heatmap for this range.")
+        return
+
+    z = matrix.values
+    x_labels = [str(c) for c in matrix.columns]
+    y_labels = [f"{s:g}" for s in matrix.index]
+
+    flat_vals = pd.DataFrame(z).values.flatten()
+    flat_vals = flat_vals[~pd.isna(flat_vals)]
+    max_abs = max(abs(flat_vals.min()), abs(flat_vals.max()), 1) if len(flat_vals) else 1
+
+    text = [[fmt_money_short(v) if pd.notna(v) else "" for v in row] for row in z]
+
+    flat = pd.DataFrame(z, index=matrix.index, columns=matrix.columns).stack()
+    long_king = flat.idxmax() if not flat.empty and flat.max() > 0 else None
+    short_king = flat.idxmin() if not flat.empty and flat.min() < 0 else None
+
+    for coords, label in [(long_king, "\U0001F451L"), (short_king, "\U0001F451S")]:
+        if coords is None:
+            continue
+        r = list(matrix.index).index(coords[0])
+        c = list(matrix.columns).index(coords[1])
+        text[r][c] = f"{label} {text[r][c]}"
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=x_labels,
+            y=y_labels,
+            colorscale="RdYlGn",
+            zmid=0,
+            zmin=-max_abs,
+            zmax=max_abs,
+            text=text,
+            texttemplate="%{text}",
+            textfont={"size": 11},
+            colorbar=dict(title="GEX"),
+            hoverongaps=False,
+        )
+    )
+
+    spot_labels = [float(s) for s in matrix.index]
+    closest_idx = min(range(len(spot_labels)), key=lambda i: abs(spot_labels[i] - spot))
+    fig.add_hline(
+        y=y_labels[closest_idx],
+        line_dash="dash",
+        line_color="white",
+        annotation_text=f"Spot: ${spot:.2f}",
+        annotation_position="right",
+    )
+
+    fig.update_layout(
+        title=title,
+        yaxis_title="Strike",
+        xaxis_title="Expiration",
+        height=max(500, 32 * len(y_labels)),
+        margin=dict(l=10, r=10, t=50, b=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("\U0001F451L = long-gamma king node · \U0001F451S = short-gamma king node")
+
 
 def _gh_headers():
     token = st.secrets.get("GITHUB_TOKEN")
     if not token:
         return None
-    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "heatseeker-streamlit-app",
+    }
 
 
 def add_ticker_to_watchlist(ticker, bin_size, mode):
@@ -73,7 +158,7 @@ def add_ticker_to_watchlist(ticker, bin_size, mode):
     url = f"{GITHUB_API}/repos/{repo}/contents/tickers.json"
     r = requests.get(url, headers=headers)
     if r.status_code != 200:
-        return False, f"Couldn't read tickers.json ({r.status_code}): {r.text[:200]}"
+        return False, f"Couldn't read tickers.json ({r.status_code}): {r.text[:300]}"
 
     file_data = r.json()
     sha = file_data["sha"]
@@ -92,13 +177,13 @@ def add_ticker_to_watchlist(ticker, bin_size, mode):
     }
     r2 = requests.put(url, headers=headers, json=put_body)
     if r2.status_code not in (200, 201):
-        return False, f"Couldn't save ({r2.status_code}): {r2.text[:200]}"
-    return True, f"{ticker} added! It'll start showing up after the next scheduled run."
+        return False, f"Couldn't save ({r2.status_code}): {r2.text[:300]}"
+    return True, f"{ticker} added! It'll show up after the next scheduled run (within 15 min, during market hours)."
 
 
 latest = load_latest()
 
-tab_tracked, tab_lookup = st.tabs(["📊 Tracked Watchlist", "🔍 Look Up Any Ticker"])
+tab_tracked, tab_lookup = st.tabs(["\U0001F4CA Tracked Watchlist", "\U0001F50D Look Up Any Ticker"])
 
 with tab_tracked:
     if latest is None:
@@ -109,13 +194,13 @@ with tab_tracked:
         )
     else:
         tickers = list(latest.keys())
-        selected = st.selectbox("Ticker", tickers)
+        selected = st.selectbox("Ticker", tickers, key="tracked_ticker")
 
         info = latest[selected]
         st.metric("Spot Price", f"${info['spot']:.2f}")
 
         rows = []
-        for strike, vals in sorted(info["nodes"].items(), key=lambda kv: float(kv[0])):
+        for strike, vals in info["nodes"].items():
             rows.append({
                 "Strike": float(strike),
                 "GEX": vals["GEX"],
@@ -123,8 +208,7 @@ with tab_tracked:
                 "Δ 15m %": vals["pct_change_15m"],
                 "Δ 1d %": vals["pct_change_1d"],
             })
-
-        df = pd.DataFrame(rows).sort_values("Strike")
+        df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
 
         st.dataframe(
             df.style
@@ -132,21 +216,20 @@ with tab_tracked:
             .map(color_pct, subset=["Δ 15m %", "Δ 1d %"]),
             use_container_width=True,
             hide_index=True,
-            height=600,
+            height=400,
         )
 
         st.caption(
-            "Refreshes automatically every 15 min during market hours "
-            "(data pushed by GitHub Actions). Only tickers in tickers.json "
-            "get this history — add a ticker there (and commit it) to start "
-            "tracking it over time."
+            "This table is aggregated across all expirations (that's what "
+            "carries the 15m/1d history). For a full per-expiration heatmap "
+            "of this ticker, use the lookup tab below."
         )
 
 with tab_lookup:
     st.caption(
         "Live snapshot only — no 15m/1d history, since this ticker isn't "
-        "being tracked by the scheduled job. To get history, add it to "
-        "tickers.json in the repo."
+        "being tracked by the scheduled job. Add it to the watchlist below "
+        "to start tracking it."
     )
     ticker_input = st.text_input("Ticker symbol", placeholder="e.g. NVDA").strip().upper()
     bin_size = st.number_input("Strike bin size", min_value=0.5, value=5.0, step=0.5)
@@ -157,34 +240,51 @@ with tab_lookup:
             try:
                 df_raw, spot = fetch_heatseeker_data(ticker_input, mode=mode)
             except Exception as e:
+                st.session_state["lookup_result"] = None
                 st.error(f"Error fetching {ticker_input}: {e}")
                 df_raw, spot = None, None
 
         if df_raw is None:
+            st.session_state["lookup_result"] = None
             st.error(f"No data found for '{ticker_input}'. Check the symbol.")
         else:
-            st.metric("Spot Price", f"${spot:.2f}")
-            nodes = extract_nodes(df_raw, spot, bin_size=bin_size)
-            nodes = nodes.reset_index().rename(columns={"index": "Strike", "strike_bin": "Strike"})
-            st.dataframe(
-                nodes[["Strike", "GEX", "VEX", "DEX", "CHARM"]].style
-                .format({"GEX": fmt_money, "VEX": fmt_money, "DEX": fmt_money, "CHARM": fmt_money}),
-                use_container_width=True,
-                hide_index=True,
-                height=600,
-            )
+            st.session_state["lookup_result"] = {
+                "ticker": ticker_input,
+                "spot": spot,
+                "df_raw": df_raw,
+                "bin_size": bin_size,
+                "mode": mode,
+            }
 
-            st.divider()
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.caption(
-                    f"Want {ticker_input} tracked every 15 min going forward "
-                    "(with 15m/1d % change history)?"
-                )
-            with col2:
-                if st.button(f"➕ Add {ticker_input} to Watchlist"):
-                    ok, msg = add_ticker_to_watchlist(ticker_input, bin_size, mode)
-                    if ok:
-                        st.success(msg)
-                    else:
-                        st.error(msg)
+    result = st.session_state.get("lookup_result")
+    if result:
+        st.metric("Spot Price", f"${result['spot']:.2f}")
+
+        matrix = extract_matrix(result["df_raw"], result["spot"], mode="GEX", bin_size=result["bin_size"])
+        render_heatmap(matrix, result["spot"], f"{result['ticker']} — GEX by strike & expiration")
+
+        nodes = extract_nodes(result["df_raw"], result["spot"], bin_size=result["bin_size"])
+        nodes = nodes.reset_index().rename(columns={"strike_bin": "Strike"})
+        nodes = nodes.sort_values("Strike", ascending=False)
+        st.dataframe(
+            nodes[["Strike", "GEX", "VEX"]].style
+            .format({"GEX": fmt_money, "VEX": fmt_money}),
+            use_container_width=True,
+            hide_index=True,
+            height=400,
+        )
+
+        st.divider()
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.caption(
+                f"Want {result['ticker']} tracked every 15 min going forward "
+                "(with 15m/1d % change history)?"
+            )
+        with col2:
+            if st.button(f"➕ Add {result['ticker']} to Watchlist"):
+                ok, msg = add_ticker_to_watchlist(result["ticker"], result["bin_size"], result["mode"])
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
