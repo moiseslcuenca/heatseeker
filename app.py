@@ -54,6 +54,22 @@ def gradient_style(df, cols):
     return styler
 
 
+def highlight_spot_row(styler, df, spot, strike_col="Strike"):
+    """Outlines the row whose strike is closest to the current spot price,
+    so it's obvious at a glance where price is standing right now."""
+    if df.empty or spot is None:
+        return styler
+    strikes = df[strike_col].to_numpy()
+    closest = strikes[abs(strikes - spot).argmin()]
+
+    def _row_style(row):
+        if row[strike_col] == closest:
+            return ["border-top: 2px solid #FFD700; border-bottom: 2px solid #FFD700; font-weight: bold"] * len(row)
+        return [""] * len(row)
+
+    return styler.apply(_row_style, axis=1)
+
+
 def fmt_money(x):
     if x is None or pd.isna(x):
         return ""
@@ -229,7 +245,7 @@ with tab_market:
         df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
 
         st.dataframe(
-            gradient_style(df, [metric]).format({metric: fmt_money}),
+            highlight_spot_row(gradient_style(df, [metric]), df, info["spot"]).format({metric: fmt_money}),
             use_container_width=True,
             hide_index=True,
             height=500,
@@ -263,7 +279,7 @@ with tab_tracked:
         df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
 
         st.dataframe(
-            gradient_style(df, ["GEX", "VEX"])
+            highlight_spot_row(gradient_style(df, ["GEX", "VEX"]), df, info["spot"])
             .format({"GEX": fmt_money, "VEX": fmt_money, "Δ 15m %": "{:+.1f}%", "Δ 1d %": "{:+.1f}%"})
             .map(color_pct, subset=["Δ 15m %", "Δ 1d %"]),
             use_container_width=True,
@@ -321,7 +337,8 @@ with tab_lookup:
         nodes = nodes.reset_index().rename(columns={"strike_bin": "Strike"})
         nodes = nodes.sort_values("Strike", ascending=False)[["Strike", "GEX", "VEX"]]
         st.dataframe(
-            gradient_style(nodes, ["GEX", "VEX"]).format({"GEX": fmt_money, "VEX": fmt_money}),
+            highlight_spot_row(gradient_style(nodes, ["GEX", "VEX"]), nodes, result["spot"])
+            .format({"GEX": fmt_money, "VEX": fmt_money}),
             use_container_width=True,
             hide_index=True,
             height=400,
