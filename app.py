@@ -303,12 +303,17 @@ with tab_lookup:
     )
     ticker_input = st.text_input("Ticker symbol", placeholder="e.g. NVDA").strip().upper()
     bin_size = st.number_input("Strike bin size", min_value=0.5, value=5.0, step=0.5)
-    mode = st.radio("Expiration mode", ["daily", "weekly", "all"], horizontal=True, index=2)
+    mode = st.radio("Expiration mode", ["daily", "weekly", "all"], horizontal=True, index=1)
+    max_exp = None
+    if mode in ("daily", "weekly"):
+        uncapped = st.checkbox("No cap (pull every matching expiration)", value=False)
+        if not uncapped:
+            max_exp = st.number_input("Max expirations", min_value=1, value=12, step=1)
 
     if st.button("Fetch", type="primary") and ticker_input:
         with st.spinner(f"Fetching live option chain for {ticker_input}..."):
             try:
-                df_raw, spot = fetch_heatseeker_data(ticker_input, mode=mode)
+                df_raw, spot = fetch_heatseeker_data(ticker_input, mode=mode, max_expirations=max_exp)
             except Exception as e:
                 st.session_state["lookup_result"] = None
                 st.error(f"Error fetching {ticker_input}: {e}")
