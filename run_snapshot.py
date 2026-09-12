@@ -2,9 +2,19 @@
 heatseeker/run_snapshot.py
 
 Entrypoint called by GitHub Actions every 15 min during market hours.
-Reads tickers.json, fetches + computes nodes for each, saves a snapshot
-with pct_change_15m / pct_change_1d, writes a combined latest.json for
-the dashboard to read.
+
+Reads tickers.json (two groups: "market" and "watchlist"), fetches +
+computes nodes for each entry, saves a snapshot per group+ticker with
+pct_change_15m / pct_change_1d, and writes a combined latest.json shaped as:
+
+{
+  "market":    { "^SPX": {...}, "SPY": {...}, "QQQ": {...} },
+  "watchlist": { "SPY": {...}, "QQQ": {...}, "AAPL": {...}, ... }
+}
+
+Storing market/SPY and watchlist/SPY separately (different folders under
+data/) lets the same ticker be tracked with different expiration scope in
+each group without the histories interfering.
 """
 
 import json
@@ -18,35 +28,27 @@ from snapshot import save_snapshot, DATA_DIR
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tickers.json")
 
 
-def load_tickers():
+def load_config():
     with open(CONFIG_PATH) as f:
-        cfg = json.load(f)
-    return cfg["tickers"]  # e.g. [{"ticker": "SPY", "bin_size": 5, "mode": "daily"}, ...]
+        return json.load(f)
 
 
-def main():
-    if not is_market_open():
-        print("Market closed. Skipping run.")
-        return
-
-    close_run = is_last_run_of_day()
-    tickers = load_tickers()
-    latest = {}
-
-    for t in tickers:
+def run_group(group, entries, close_run):
+    results = {}
+    for t in entries:
         ticker = t["ticker"]
         bin_size = t.get("bin_size", 5)
         mode = t.get("mode", "daily")
 
         df, spot = fetch_heatseeker_data(ticker, mode=mode)
         if df is None:
-            print(f"⚠️  No data for {ticker}, skipping.")
+            print(f"⚠️  [{group}] No data for {ticker}, skipping.")
             continue
 
         nodes = extract_nodes(df, spot, bin_size=bin_size)
-        result = save_snapshot(ticker, nodes, spot, is_close=close_run)
+        result = save_snapshot(group, ticker, nodes, spot, is_close=close_run)
 
-        latest[ticker] = {
+        results[ticker] = {
             "spot": spot,
             "nodes": {
                 str(strike): {
@@ -58,7 +60,22 @@ def main():
                 for strike, row in result.iterrows()
             },
         }
-        print(f"✅ {ticker}: spot ${spot:.2f}, {len(nodes)} nodes saved.")
+        print(f"✅ [{group}] {ticker}: spot ${spot:.2f}, {len(nodes)} nodes saved.")
+    return results
+
+
+def main():
+    if not is_market_open():
+        print("Market closed. Skipping run.")
+        return
+
+    close_run = is_last_run_of_day()
+    config = load_config()
+
+    latest = {
+        "market": run_group("market", config.get("market", []), close_run),
+        "watchlist": run_group("watchlist", config.get("watchlist", []), close_run),
+    }
 
     latest_path = os.path.join(DATA_DIR, "latest.json")
     with open(latest_path, "w") as f:
