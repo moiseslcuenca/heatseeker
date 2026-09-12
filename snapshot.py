@@ -26,29 +26,33 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 ET = pytz.timezone("America/New_York")
 
 
-def _day_path(ticker, date_str):
-    d = os.path.join(DATA_DIR, ticker)
+def _key(group, ticker):
+    return f"{group}__{ticker}"
+
+
+def _day_path(group, ticker, date_str):
+    d = os.path.join(DATA_DIR, _key(group, ticker))
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, f"{date_str}.json")
 
 
-def _load_day(ticker, date_str):
-    path = _day_path(ticker, date_str)
+def _load_day(group, ticker, date_str):
+    path = _day_path(group, ticker, date_str)
     if os.path.exists(path):
         with open(path) as f:
             return json.load(f)
     return {"snapshots": [], "close_snapshot": None}
 
 
-def _save_day(ticker, date_str, data):
-    path = _day_path(ticker, date_str)
+def _save_day(group, ticker, date_str, data):
+    path = _day_path(group, ticker, date_str)
     with open(path, "w") as f:
         json.dump(data, f, indent=2, default=str)
 
 
-def find_prev_close(ticker, date_str):
+def find_prev_close(group, ticker, date_str):
     """Scan stored files for this ticker, find latest date < date_str with a close_snapshot."""
-    tdir = os.path.join(DATA_DIR, ticker)
+    tdir = os.path.join(DATA_DIR, _key(group, ticker))
     if not os.path.isdir(tdir):
         return None
     candidates = sorted(
@@ -63,7 +67,7 @@ def find_prev_close(ticker, date_str):
     return None
 
 
-def save_snapshot(ticker, nodes_df, spot_price, is_close=False, now_utc=None):
+def save_snapshot(group, ticker, nodes_df, spot_price, is_close=False, now_utc=None):
     """
     nodes_df: DataFrame indexed by strike_bin with GEX/VEX/DEX/CHARM columns
               (output of core.extract_nodes).
@@ -75,7 +79,7 @@ def save_snapshot(ticker, nodes_df, spot_price, is_close=False, now_utc=None):
     date_str = now_et.strftime("%Y-%m-%d")
     time_str = now_et.strftime("%H:%M:%S")
 
-    day = _load_day(ticker, date_str)
+    day = _load_day(group, ticker, date_str)
 
     nodes_dict = {
         str(strike): {c: float(nodes_df.loc[strike, c]) for c in ["GEX", "VEX", "DEX", "CHARM"]}
@@ -84,7 +88,7 @@ def save_snapshot(ticker, nodes_df, spot_price, is_close=False, now_utc=None):
     new_snap = {"time": time_str, "spot": float(spot_price), "nodes": nodes_dict}
 
     prev_snap = day["snapshots"][-1] if day["snapshots"] else None
-    prev_close = find_prev_close(ticker, date_str)
+    prev_close = find_prev_close(group, ticker, date_str)
 
     result = nodes_df.copy()
     result["pct_change_15m"] = _pct_change_series(nodes_dict, prev_snap["nodes"] if prev_snap else None)
@@ -93,7 +97,7 @@ def save_snapshot(ticker, nodes_df, spot_price, is_close=False, now_utc=None):
     day["snapshots"].append(new_snap)
     if is_close:
         day["close_snapshot"] = new_snap
-    _save_day(ticker, date_str, day)
+    _save_day(group, ticker, date_str, day)
 
     return result
 
