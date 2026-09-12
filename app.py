@@ -1,14 +1,14 @@
 """
 heatseeker/app.py
 
-Streamlit dashboard.
-- "Tracked Watchlist" tab: reads data/latest.json (written by GitHub Actions
-  every 15 min during market hours), shows the 15m/1d % change table for the
-  aggregated node.
-- "Look Up Any Ticker" tab: live on-demand fetch for any symbol, with a full
-  GEX heatmap (strike x expiration, matching the notebook's style) and a
-  button to add it to the tracked watchlist (writes to tickers.json in the
-  GitHub repo via the API; the scheduled job picks it up next run).
+Streamlit dashboard, three tabs:
+- "Market": SPX / SPY / QQQ, same-day expiration only, GEX/VEX toggle.
+- "Tracked Watchlist": SPY/QQQ (all expirations) + anything added via the
+  lookup tab. Shows the 15m/1d % change table for the aggregated node.
+- "Look Up Any Ticker": live on-demand fetch for any symbol, full GEX
+  heatmap (strike x expiration), with a button to add it to the tracked
+  watchlist (writes to tickers.json in the GitHub repo via the API; the
+  scheduled job picks it up next run).
 """
 
 import base64
@@ -52,10 +52,6 @@ def gradient_style(df, cols):
             subset=[col], cmap="RdYlGn", vmin=-vmax, vmax=vmax
         )
     return styler
-    if val is None or pd.isna(val):
-        return ""
-    color = "#00C853" if val > 0 else "#FF3131" if val < 0 else "white"
-    return f"color: {color}; font-weight: bold"
 
 
 def fmt_money(x):
@@ -87,8 +83,8 @@ def fmt_money_short(x):
 def render_heatmap(matrix, spot, title):
     """
     matrix: DataFrame, index=strike (descending), columns=expiration dates,
-    values=GEX. Renders a Plotly heatmap: diverging color scale, king node
-    (max positive / max negative) starred.
+    values=GEX/VEX. Renders a Plotly heatmap: diverging color scale, king
+    node (max positive / max negative) starred.
     """
     if matrix.empty:
         st.info("Not enough data to draw a heatmap for this range.")
@@ -127,13 +123,11 @@ def render_heatmap(matrix, spot, title):
             text=text,
             texttemplate="%{text}",
             textfont={"size": 11},
-            colorbar=dict(title="GEX"),
+            colorbar=dict(title="Exposure"),
             hoverongaps=False,
         )
     )
 
-    # Numeric y-axis lets add_hline compute a real position (categorical/text
-    # axes crash plotly's add_hline internals).
     fig.add_hline(
         y=spot,
         line_dash="dash",
@@ -165,7 +159,9 @@ def _gh_headers():
     }
 
 
-def add_ticker_to_watchlist(ticker, bin_size, mode):
+def add_ticker_to_watchlist(ticker, bin_size, mode="all"):
+    """Adds ticker to the 'watchlist' group in tickers.json (SPY/QQQ track
+    all expirations by default there; new tickers do too, matching them)."""
     headers = _gh_headers()
     repo = st.secrets.get("GITHUB_REPO")
     if not headers or not repo:
@@ -179,11 +175,12 @@ def add_ticker_to_watchlist(ticker, bin_size, mode):
     file_data = r.json()
     sha = file_data["sha"]
     current = json.loads(base64.b64decode(file_data["content"]))
+    current.setdefault("watchlist", [])
 
-    if any(t["ticker"] == ticker for t in current["tickers"]):
+    if any(t["ticker"] == ticker for t in current["watchlist"]):
         return False, f"{ticker} is already on the watchlist."
 
-    current["tickers"].append({"ticker": ticker, "bin_size": bin_size, "mode": mode})
+    current["watchlist"].append({"ticker": ticker, "bin_size": bin_size, "mode": mode})
     new_content = json.dumps(current, indent=2) + "\n"
 
     put_body = {
@@ -198,21 +195,60 @@ def add_ticker_to_watchlist(ticker, bin_size, mode):
 
 
 latest = load_latest()
+market_data = (latest or {}).get("market", {})
+watchlist_data = (latest or {}).get("watchlist", {})
 
-tab_tracked, tab_lookup = st.tabs(["\U0001F4CA Tracked Watchlist", "\U0001F50D Look Up Any Ticker"])
+tab_market, tab_tracked, tab_lookup = st.tabs(
+    ["🏛️ Market", "📊 Tracked Watchlist", "🔍 Look Up Any Ticker"]
+)
 
+# ============================== MARKET TAB ==============================
+with tab_market:
+    if not market_data:
+        st.warning(
+            "No market data yet. The GitHub Actions job hasn't run during "
+            "market hours yet, or hasn't pushed data."
+        )
+    else:
+        display_names = {"^SPX": "SPX"}
+        tickers = list(market_data.keys())
+        labels = [display_names.get(t, t) for t in tickers]
+        label_to_ticker = dict(zip(labels, tickers))
+
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            selected_label = st.selectbox("Index / Ticker", labels, key="market_ticker")
+        with col2:
+            metric = st.radio("Metric", ["GEX", "VEX"], horizontal=True, key="market_metric")
+
+        selected = label_to_ticker[selected_label]
+        info = market_data[selected]
+        st.metric("Spot Price", f"${info['spot']:.2f}")
+
+        rows = [{"Strike": float(strike), metric: vals[metric]} for strike, vals in info["nodes"].items()]
+        df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
+
+        st.dataframe(
+            gradient_style(df, [metric]).format({metric: fmt_money}),
+            use_container_width=True,
+            hide_index=True,
+            height=500,
+        )
+        st.caption("Same-day expiration only. Refreshes every 15 min during market hours.")
+
+# ============================== TRACKED TAB ==============================
 with tab_tracked:
-    if latest is None:
+    if not watchlist_data:
         st.warning(
             "No data yet. The GitHub Actions job hasn't run during market hours "
             "yet, or hasn't pushed data. Trigger it manually from the Actions "
             "tab (workflow_dispatch) to test."
         )
     else:
-        tickers = list(latest.keys())
+        tickers = list(watchlist_data.keys())
         selected = st.selectbox("Ticker", tickers, key="tracked_ticker")
 
-        info = latest[selected]
+        info = watchlist_data[selected]
         st.metric("Spot Price", f"${info['spot']:.2f}")
 
         rows = []
@@ -232,24 +268,26 @@ with tab_tracked:
             .map(color_pct, subset=["Δ 15m %", "Δ 1d %"]),
             use_container_width=True,
             hide_index=True,
-            height=400,
+            height=500,
         )
 
         st.caption(
-            "This table is aggregated across all expirations (that's what "
-            "carries the 15m/1d history). For a full per-expiration heatmap "
-            "of this ticker, use the lookup tab below."
+            "SPY and QQQ here track ALL expirations (unlike the Market tab, "
+            "which is same-day only). This table is aggregated across "
+            "expirations — that's what carries the 15m/1d history. For a "
+            "full per-expiration heatmap of this ticker, use the lookup tab."
         )
 
+# ============================== LOOKUP TAB ==============================
 with tab_lookup:
     st.caption(
         "Live snapshot only — no 15m/1d history, since this ticker isn't "
         "being tracked by the scheduled job. Add it to the watchlist below "
-        "to start tracking it."
+        "to start tracking it (all expirations)."
     )
     ticker_input = st.text_input("Ticker symbol", placeholder="e.g. NVDA").strip().upper()
     bin_size = st.number_input("Strike bin size", min_value=0.5, value=5.0, step=0.5)
-    mode = st.radio("Expiration mode", ["daily", "weekly"], horizontal=True)
+    mode = st.radio("Expiration mode", ["daily", "weekly", "all"], horizontal=True, index=2)
 
     if st.button("Fetch", type="primary") and ticker_input:
         with st.spinner(f"Fetching live option chain for {ticker_input}..."):
@@ -283,8 +321,7 @@ with tab_lookup:
         nodes = nodes.reset_index().rename(columns={"strike_bin": "Strike"})
         nodes = nodes.sort_values("Strike", ascending=False)[["Strike", "GEX", "VEX"]]
         st.dataframe(
-            gradient_style(nodes, ["GEX", "VEX"])
-            .format({"GEX": fmt_money, "VEX": fmt_money}),
+            gradient_style(nodes, ["GEX", "VEX"]).format({"GEX": fmt_money, "VEX": fmt_money}),
             use_container_width=True,
             hide_index=True,
             height=400,
@@ -295,7 +332,7 @@ with tab_lookup:
         with col1:
             st.caption(
                 f"Want {result['ticker']} tracked every 15 min going forward "
-                "(with 15m/1d % change history)?"
+                "(with 15m/1d % change history, all expirations)?"
             )
         with col2:
             if st.button(f"➕ Add {result['ticker']} to Watchlist"):
