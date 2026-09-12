@@ -100,6 +100,10 @@ def fetch_heatseeker_data(ticker, mode="daily", verbose=False):
                 break
         if not target_expirations:
             target_expirations = expirations[:6]
+    elif mode == "all":
+        target_expirations = list(expirations)
+    elif mode == "today":
+        target_expirations = expirations[:1]
 
     all_options = []
     for date in target_expirations:
