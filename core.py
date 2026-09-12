@@ -69,7 +69,11 @@ def get_greeks(row, spot_price, risk_free_rate=0.045):
 
 # --- DATA ENGINE (unchanged logic, print -> logging optional) ---
 
-def fetch_heatseeker_data(ticker, mode="daily", verbose=False):
+def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=False):
+    """
+    max_expirations: cap on how many expiration dates to pull.
+    None = no cap (pull everything available for the mode).
+    """
     tk = yf.Ticker(ticker)
     try:
         current_price = tk.fast_info["last_price"]
@@ -91,15 +95,15 @@ def fetch_heatseeker_data(ticker, mode="daily", verbose=False):
 
     target_expirations = []
     if mode == "daily":
-        target_expirations = expirations[:6]
+        target_expirations = expirations if max_expirations is None else expirations[:max_expirations]
     elif mode == "weekly":
         for date in expirations:
             if datetime.strptime(date, "%Y-%m-%d").weekday() == 4:
                 target_expirations.append(date)
-            if len(target_expirations) >= 6:
+            if max_expirations and len(target_expirations) >= max_expirations:
                 break
         if not target_expirations:
-            target_expirations = expirations[:6]
+            target_expirations = expirations if max_expirations is None else expirations[:max_expirations]
     elif mode == "all":
         target_expirations = list(expirations)
     elif mode == "today":
