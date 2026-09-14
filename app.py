@@ -227,30 +227,27 @@ with tab_market:
         )
     else:
         display_names = {"^SPX": "SPX"}
-        tickers = list(market_data.keys())
-        labels = [display_names.get(t, t) for t in tickers]
-        label_to_ticker = dict(zip(labels, tickers))
-
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            selected_label = st.selectbox("Index / Ticker", labels, key="market_ticker")
-        with col2:
-            metric = st.radio("Metric", ["GEX", "VEX"], horizontal=True, key="market_metric")
-
-        selected = label_to_ticker[selected_label]
-        info = market_data[selected]
-        st.metric("Spot Price", f"${info['spot']:.2f}")
-
-        rows = [{"Strike": float(strike), metric: vals[metric]} for strike, vals in info["nodes"].items()]
-        df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
-
-        st.dataframe(
-            highlight_spot_row(gradient_style(df, [metric]), df, info["spot"]).format({metric: fmt_money}),
-            use_container_width=True,
-            hide_index=True,
-            height=500,
-        )
+        metric = st.radio("Metric", ["GEX", "VEX"], horizontal=True, key="market_metric")
         st.caption("Same-day expiration only. Refreshes every 15 min during market hours.")
+
+        tickers = list(market_data.keys())
+        cols = st.columns(len(tickers))
+
+        for col, ticker in zip(cols, tickers):
+            with col:
+                info = market_data[ticker]
+                st.subheader(display_names.get(ticker, ticker))
+                st.metric("Spot", f"${info['spot']:.2f}")
+
+                rows = [{"Strike": float(s), metric: v[metric]} for s, v in info["nodes"].items()]
+                df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
+
+                st.dataframe(
+                    highlight_spot_row(gradient_style(df, [metric]), df, info["spot"]).format({metric: fmt_money}),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=500,
+                )
 
 # ============================== TRACKED TAB ==============================
 with tab_tracked:
@@ -267,6 +264,21 @@ with tab_tracked:
         info = watchlist_data[selected]
         st.metric("Spot Price", f"${info['spot']:.2f}")
 
+        if "matrix" in info:
+            # Full per-expiration breakdown, same heatmap as the lookup tab.
+            metric = st.radio("Metric", ["GEX", "VEX"], horizontal=True, key="tracked_metric")
+            matrix_dict = info["matrix"][metric]
+            expirations = info["matrix"]["expirations"]
+            matrix = pd.DataFrame(matrix_dict).T  # rows=strike, cols=expiration
+            matrix = matrix.reindex(columns=expirations)
+            matrix.index = matrix.index.astype(float)
+            matrix = matrix.sort_index(ascending=False)
+            render_heatmap(matrix, info["spot"], f"{selected} — {metric} by strike & expiration")
+        else:
+            st.info("No per-expiration data stored for this ticker yet (next scheduled run will add it).")
+
+        st.divider()
+        st.caption("Aggregated totals across all expirations, with 15m/1d history:")
         rows = []
         for strike, vals in info["nodes"].items():
             rows.append({
@@ -284,14 +296,7 @@ with tab_tracked:
             .map(color_pct, subset=["Δ 15m %", "Δ 1d %"]),
             use_container_width=True,
             hide_index=True,
-            height=500,
-        )
-
-        st.caption(
-            "SPY and QQQ here track ALL expirations (unlike the Market tab, "
-            "which is same-day only). This table is aggregated across "
-            "expirations — that's what carries the 15m/1d history. For a "
-            "full per-expiration heatmap of this ticker, use the lookup tab."
+            height=400,
         )
 
 # ============================== LOOKUP TAB ==============================
