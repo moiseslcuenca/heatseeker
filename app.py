@@ -14,6 +14,7 @@ Streamlit dashboard, three tabs:
 import base64
 import json
 import os
+from datetime import datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -27,6 +28,15 @@ GITHUB_API = "https://api.github.com"
 
 st.set_page_config(page_title="HeatSeeker", layout="wide")
 st.title("🎯 HeatSeeker Node Tracker")
+
+auto_refresh = st.sidebar.checkbox("🔄 Auto-refresh every 5 min", value=True)
+if auto_refresh:
+    st.markdown('<meta http-equiv="refresh" content="300">', unsafe_allow_html=True)
+st.sidebar.caption(
+    "Reloads the whole page every 5 min so new 15-min snapshots show up "
+    "without you refreshing manually. Turn off if it's interrupting typing "
+    "in the Lookup tab."
+)
 
 
 def load_latest():
@@ -90,6 +100,16 @@ def _format_cell(value, pct_15m):
     return f"{sign}{pct_15m:.0f}% {val_str}"
 
 
+def is_monthly_opex(date_str):
+    """Monthly OPEX = 3rd Friday of the month (the standard monthly options
+    expiration). Works for any date string, regardless of daily/weekly mode."""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return False
+    return d.weekday() == 4 and 15 <= d.day <= 21
+
+
 def render_matrix_grid(value_grid, pct_grid, spot, cmap_name="RdYlGn"):
     """
     value_grid/pct_grid: DataFrames, index=strike, columns=expiration date,
@@ -99,6 +119,7 @@ def render_matrix_grid(value_grid, pct_grid, spot, cmap_name="RdYlGn"):
       for every other date — this is what makes it read as a real heatmap.
     - each cell's text prefixed with its 15m % change.
     - the spot-price row filled white.
+    - monthly OPEX columns (3rd Friday) get a gold border + label.
     """
     import matplotlib
     import matplotlib.cm as cm
@@ -116,6 +137,8 @@ def render_matrix_grid(value_grid, pct_grid, spot, cmap_name="RdYlGn"):
         v = value_grid[exp].abs().max()
         col_vmax[exp] = v if pd.notna(v) and v > 0 else 1
 
+    opex_border = "border-left: 3px solid #FFD700; border-right: 3px solid #FFD700;"
+
     text_rows, bg_rows = [], []
     for strike in strikes:
         trow, brow = [], []
@@ -123,17 +146,22 @@ def render_matrix_grid(value_grid, pct_grid, spot, cmap_name="RdYlGn"):
             v = value_grid.loc[strike, exp]
             p = pct_grid.loc[strike, exp]
             trow.append(_format_cell(v, p))
+            border = opex_border if is_monthly_opex(exp) else ""
             if pd.isna(v):
-                brow.append("")
+                brow.append(border)
             else:
                 norm = mcolors.TwoSlopeNorm(vmin=-col_vmax[exp], vcenter=0, vmax=col_vmax[exp])
-                brow.append(f"background-color: {mcolors.to_hex(cmap(norm(v)))}; color: #000000")
+                brow.append(f"background-color: {mcolors.to_hex(cmap(norm(v)))}; color: #000000; {border}")
         text_rows.append(trow)
         bg_rows.append(brow)
 
-    text_df = pd.DataFrame(text_rows, columns=expirations)
+    # Mark OPEX columns right in the header text too, since a border alone
+    # is easy to miss when scrolling a wide grid.
+    column_labels = [f"{exp} \U0001F3AF" if is_monthly_opex(exp) else exp for exp in expirations]
+
+    text_df = pd.DataFrame(text_rows, columns=column_labels)
     text_df.insert(0, "Strike", strikes)
-    bg_df = pd.DataFrame(bg_rows, columns=expirations)
+    bg_df = pd.DataFrame(bg_rows, columns=column_labels)
     bg_df.insert(0, "Strike", [""] * len(strikes))
 
     styler = text_df.style.apply(lambda _: bg_df, axis=None)
