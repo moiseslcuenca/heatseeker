@@ -20,12 +20,16 @@ each group without the histories interfering.
 import json
 import os
 import sys
+from datetime import datetime, timezone
+
+import pytz
 
 from core import fetch_heatseeker_data, extract_nodes, extract_matrix
 from market_hours import is_market_open, is_last_run_of_day
-from snapshot import save_snapshot, DATA_DIR
+from snapshot import save_snapshot, save_matrix_snapshot, DATA_DIR
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tickers.json")
+ET = pytz.timezone("America/New_York")
 
 
 def load_config():
@@ -79,9 +83,13 @@ def run_group(group, entries, close_run, include_matrix=False):
                                          zoom_range=(df["strike"].min(), df["strike"].max()))
             matrix_vex = extract_matrix(df, spot, mode="VEX", bin_size=bin_size,
                                          zoom_range=(df["strike"].min(), df["strike"].max()))
+            gex_dict = _matrix_to_json(matrix_gex)
+            vex_dict = _matrix_to_json(matrix_vex)
+
+            annotated = save_matrix_snapshot(group, ticker, gex_dict, vex_dict, spot, is_close=close_run)
             entry["matrix"] = {
-                "GEX": _matrix_to_json(matrix_gex),
-                "VEX": _matrix_to_json(matrix_vex),
+                "GEX": annotated["GEX"],
+                "VEX": annotated["VEX"],
                 "expirations": [str(c) for c in matrix_gex.columns],
             }
 
@@ -98,7 +106,10 @@ def main():
     close_run = is_last_run_of_day()
     config = load_config()
 
+    now_et = datetime.now(timezone.utc).astimezone(ET)
+
     latest = {
+        "last_updated": now_et.strftime("%Y-%m-%d %H:%M %Z"),
         "market": run_group("market", config.get("market", []), close_run, include_matrix=False),
         "watchlist": run_group("watchlist", config.get("watchlist", []), close_run, include_matrix=True),
     }
