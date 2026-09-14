@@ -285,54 +285,48 @@ with tab_tracked:
             st.info("No per-expiration data stored for this ticker yet (next scheduled run will add it).")
         else:
             expirations = info["matrix"]["expirations"]
-            if len(expirations) > 1:
-                selected_exp = st.select_slider(
-                    f"Expiration ({len(expirations)} available) — slide to browse",
-                    options=expirations,
-                    key="tracked_expiration",
-                )
-            else:
-                selected_exp = expirations[0]
-                st.caption(f"Expiration: {selected_exp}")
-
             metric_data = info["matrix"][metric]  # {strike: {expiration: cell}}
-            rows = []
-            for strike_str, exps in metric_data.items():
-                cell = exps.get(selected_exp)
-                if cell is None:
-                    continue
-                # Tolerate the old stored shape (plain number, from before
-                # 15m/1d tracking was added) as well as the new shape
-                # ({"value":.., "pct_15m":.., "pct_1d":..}), so stale repo
-                # data from before an update doesn't crash the app.
-                if isinstance(cell, dict):
-                    value, pct15, pct1d = cell.get("value"), _num(cell.get("pct_15m")), _num(cell.get("pct_1d"))
-                else:
-                    value, pct15, pct1d = cell, float("nan"), float("nan")
-                rows.append({
-                    "Strike": float(strike_str),
-                    metric: value,
-                    "Δ 15m %": pct15,
-                    "Δ 1d %": pct1d,
-                })
 
-            if not rows:
-                st.info("No data for this expiration.")
-            else:
-                df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
-                st.dataframe(
-                    highlight_spot_row(gradient_style(df, [metric]), df, info["spot"])
-                    .format({metric: fmt_money, "Δ 15m %": "{:+.1f}%", "Δ 1d %": "{:+.1f}%"})
-                    .map(color_pct, subset=["Δ 15m %", "Δ 1d %"]),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=600,
-                )
-                st.caption(
-                    "One expiration at a time, so it's readable instead of a "
-                    "giant cramped grid. Δ 15m % and Δ 1d % are computed "
-                    "per strike, per this specific expiration."
-                )
+            # Build a wide grid: rows = strike, columns = expiration date.
+            grid_rows = {}
+            for strike_str, exps in metric_data.items():
+                strike = float(strike_str)
+                row = {}
+                for exp in expirations:
+                    cell = exps.get(exp)
+                    if cell is None:
+                        row[exp] = float("nan")
+                    elif isinstance(cell, dict):
+                        # Tolerate old stored shape (plain number) too, so
+                        # stale repo data from before an update doesn't crash.
+                        row[exp] = _num(cell.get("value"))
+                    else:
+                        row[exp] = cell
+                grid_rows[strike] = row
+
+            grid = pd.DataFrame(grid_rows).T  # index=strike, columns=expiration
+            grid = grid.reindex(columns=expirations)
+            grid = grid.sort_index(ascending=False)
+            grid.index.name = "Strike"
+            grid = grid.reset_index()
+
+            vmax = grid[expirations].abs().max().max() or 1
+            styler = grid.style.background_gradient(subset=expirations, cmap="RdYlGn", vmin=-vmax, vmax=vmax)
+            styler = highlight_spot_row(styler, grid, info["spot"])  # applied last so white wins over gradient
+            styler = styler.format({e: fmt_money for e in expirations})
+
+            st.dataframe(
+                styler,
+                use_container_width=True,
+                hide_index=True,
+                height=600,
+            )
+            st.caption(
+                "Strikes down, expirations across — scroll right for later "
+                "dates, scroll up/down for other strikes, all on one grid. "
+                "For 15m/1d % change on a single expiration, use the "
+                "Lookup tab's live view for now."
+            )
 
 # ============================== LOOKUP TAB ==============================
 with tab_lookup:
