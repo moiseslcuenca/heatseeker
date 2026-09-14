@@ -36,6 +36,12 @@ def load_latest():
         return json.load(f)
 
 
+def _num(v):
+    """None (from JSON) -> real NaN, so pandas/format strings handle it
+    gracefully instead of crashing on a bare Python None."""
+    return float("nan") if v is None else v
+
+
 def color_pct(val):
     if val is None or pd.isna(val):
         return ""
@@ -242,7 +248,7 @@ with tab_market:
                 st.metric("Spot", f"${info['spot']:.2f}")
 
                 rows = [
-                    {"Strike": float(s), metric: v[metric], "Δ15m": v["pct_change_15m"]}
+                    {"Strike": float(s), metric: v[metric], "Δ15m": _num(v["pct_change_15m"])}
                     for s, v in info["nodes"].items()
                 ]
                 df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
@@ -300,9 +306,9 @@ with tab_tracked:
                 # ({"value":.., "pct_15m":.., "pct_1d":..}), so stale repo
                 # data from before an update doesn't crash the app.
                 if isinstance(cell, dict):
-                    value, pct15, pct1d = cell.get("value"), cell.get("pct_15m"), cell.get("pct_1d")
+                    value, pct15, pct1d = cell.get("value"), _num(cell.get("pct_15m")), _num(cell.get("pct_1d"))
                 else:
-                    value, pct15, pct1d = cell, None, None
+                    value, pct15, pct1d = cell, float("nan"), float("nan")
                 rows.append({
                     "Strike": float(strike_str),
                     metric: value,
