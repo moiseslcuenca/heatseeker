@@ -21,7 +21,7 @@ import json
 import os
 import sys
 
-from core import fetch_heatseeker_data, extract_nodes
+from core import fetch_heatseeker_data, extract_nodes, extract_matrix
 from market_hours import is_market_open, is_last_run_of_day
 from snapshot import save_snapshot, DATA_DIR
 
@@ -33,7 +33,20 @@ def load_config():
         return json.load(f)
 
 
-def run_group(group, entries, close_run):
+def _matrix_to_json(matrix):
+    """DataFrame (strike x expiration) -> plain nested dict for JSON."""
+    return {
+        str(strike): {str(col): (None if pd_isna(v) else float(v)) for col, v in row.items()}
+        for strike, row in matrix.iterrows()
+    }
+
+
+def pd_isna(v):
+    import pandas as pd
+    return pd.isna(v)
+
+
+def run_group(group, entries, close_run, include_matrix=False):
     results = {}
     for t in entries:
         ticker = t["ticker"]
@@ -48,7 +61,7 @@ def run_group(group, entries, close_run):
         nodes = extract_nodes(df, spot, bin_size=bin_size)
         result = save_snapshot(group, ticker, nodes, spot, is_close=close_run)
 
-        results[ticker] = {
+        entry = {
             "spot": spot,
             "nodes": {
                 str(strike): {
@@ -60,6 +73,19 @@ def run_group(group, entries, close_run):
                 for strike, row in result.iterrows()
             },
         }
+
+        if include_matrix:
+            matrix_gex = extract_matrix(df, spot, mode="GEX", bin_size=bin_size,
+                                         zoom_range=(df["strike"].min(), df["strike"].max()))
+            matrix_vex = extract_matrix(df, spot, mode="VEX", bin_size=bin_size,
+                                         zoom_range=(df["strike"].min(), df["strike"].max()))
+            entry["matrix"] = {
+                "GEX": _matrix_to_json(matrix_gex),
+                "VEX": _matrix_to_json(matrix_vex),
+                "expirations": [str(c) for c in matrix_gex.columns],
+            }
+
+        results[ticker] = entry
         print(f"✅ [{group}] {ticker}: spot ${spot:.2f}, {len(nodes)} nodes saved.")
     return results
 
@@ -73,8 +99,8 @@ def main():
     config = load_config()
 
     latest = {
-        "market": run_group("market", config.get("market", []), close_run),
-        "watchlist": run_group("watchlist", config.get("watchlist", []), close_run),
+        "market": run_group("market", config.get("market", []), close_run, include_matrix=False),
+        "watchlist": run_group("watchlist", config.get("watchlist", []), close_run, include_matrix=True),
     }
 
     latest_path = os.path.join(DATA_DIR, "latest.json")
