@@ -55,8 +55,8 @@ def gradient_style(df, cols):
 
 
 def highlight_spot_row(styler, df, spot, strike_col="Strike"):
-    """Outlines the row whose strike is closest to the current spot price,
-    so it's obvious at a glance where price is standing right now."""
+    """Fills the row whose strike is closest to the current spot price in
+    solid white with dark text, so it's unmistakable at a glance."""
     if df.empty or spot is None:
         return styler
     strikes = df[strike_col].to_numpy()
@@ -64,7 +64,7 @@ def highlight_spot_row(styler, df, spot, strike_col="Strike"):
 
     def _row_style(row):
         if row[strike_col] == closest:
-            return ["border-top: 2px solid #FFD700; border-bottom: 2px solid #FFD700; font-weight: bold"] * len(row)
+            return ["background-color: #FFFFFF; color: #000000; font-weight: bold"] * len(row)
         return [""] * len(row)
 
     return styler.apply(_row_style, axis=1)
@@ -211,6 +211,8 @@ def add_ticker_to_watchlist(ticker, bin_size, mode="all"):
 
 
 latest = load_latest()
+if latest and latest.get("last_updated"):
+    st.caption(f"📅 Last updated: {latest['last_updated']}")
 market_data = (latest or {}).get("market", {})
 watchlist_data = (latest or {}).get("watchlist", {})
 
@@ -239,11 +241,16 @@ with tab_market:
                 st.subheader(display_names.get(ticker, ticker))
                 st.metric("Spot", f"${info['spot']:.2f}")
 
-                rows = [{"Strike": float(s), metric: v[metric]} for s, v in info["nodes"].items()]
+                rows = [
+                    {"Strike": float(s), metric: v[metric], "Δ15m": v["pct_change_15m"]}
+                    for s, v in info["nodes"].items()
+                ]
                 df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
 
                 st.dataframe(
-                    highlight_spot_row(gradient_style(df, [metric]), df, info["spot"]).format({metric: fmt_money}),
+                    highlight_spot_row(gradient_style(df, [metric]), df, info["spot"])
+                    .format({metric: fmt_money, "Δ15m": "{:+.1f}%"})
+                    .map(color_pct, subset=["Δ15m"]),
                     use_container_width=True,
                     hide_index=True,
                     height=500,
@@ -259,45 +266,53 @@ with tab_tracked:
         )
     else:
         tickers = list(watchlist_data.keys())
-        selected = st.selectbox("Ticker", tickers, key="tracked_ticker")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            selected = st.selectbox("Ticker", tickers, key="tracked_ticker")
+        with col2:
+            metric = st.radio("Metric", ["GEX", "VEX"], horizontal=True, key="tracked_metric")
 
         info = watchlist_data[selected]
         st.metric("Spot Price", f"${info['spot']:.2f}")
 
-        if "matrix" in info:
-            # Full per-expiration breakdown, same heatmap as the lookup tab.
-            metric = st.radio("Metric", ["GEX", "VEX"], horizontal=True, key="tracked_metric")
-            matrix_dict = info["matrix"][metric]
-            expirations = info["matrix"]["expirations"]
-            matrix = pd.DataFrame(matrix_dict).T  # rows=strike, cols=expiration
-            matrix = matrix.reindex(columns=expirations)
-            matrix.index = matrix.index.astype(float)
-            matrix = matrix.sort_index(ascending=False)
-            render_heatmap(matrix, info["spot"], f"{selected} — {metric} by strike & expiration")
-        else:
+        if "matrix" not in info:
             st.info("No per-expiration data stored for this ticker yet (next scheduled run will add it).")
+        else:
+            expirations = info["matrix"]["expirations"]
+            selected_exp = st.selectbox(
+                f"Expiration ({len(expirations)} available)", expirations, key="tracked_expiration"
+            )
 
-        st.divider()
-        st.caption("Aggregated totals across all expirations, with 15m/1d history:")
-        rows = []
-        for strike, vals in info["nodes"].items():
-            rows.append({
-                "Strike": float(strike),
-                "GEX": vals["GEX"],
-                "VEX": vals["VEX"],
-                "Δ 15m %": vals["pct_change_15m"],
-                "Δ 1d %": vals["pct_change_1d"],
-            })
-        df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
+            metric_data = info["matrix"][metric]  # {strike: {expiration: {value, pct_15m, pct_1d}}}
+            rows = []
+            for strike_str, exps in metric_data.items():
+                cell = exps.get(selected_exp)
+                if cell is None:
+                    continue
+                rows.append({
+                    "Strike": float(strike_str),
+                    metric: cell["value"],
+                    "Δ 15m %": cell["pct_15m"],
+                    "Δ 1d %": cell["pct_1d"],
+                })
 
-        st.dataframe(
-            highlight_spot_row(gradient_style(df, ["GEX", "VEX"]), df, info["spot"])
-            .format({"GEX": fmt_money, "VEX": fmt_money, "Δ 15m %": "{:+.1f}%", "Δ 1d %": "{:+.1f}%"})
-            .map(color_pct, subset=["Δ 15m %", "Δ 1d %"]),
-            use_container_width=True,
-            hide_index=True,
-            height=400,
-        )
+            if not rows:
+                st.info("No data for this expiration.")
+            else:
+                df = pd.DataFrame(rows).sort_values("Strike", ascending=False)
+                st.dataframe(
+                    highlight_spot_row(gradient_style(df, [metric]), df, info["spot"])
+                    .format({metric: fmt_money, "Δ 15m %": "{:+.1f}%", "Δ 1d %": "{:+.1f}%"})
+                    .map(color_pct, subset=["Δ 15m %", "Δ 1d %"]),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=600,
+                )
+                st.caption(
+                    "One expiration at a time, so it's readable instead of a "
+                    "giant cramped grid. Δ 15m % and Δ 1d % are computed "
+                    "per strike, per this specific expiration."
+                )
 
 # ============================== LOOKUP TAB ==============================
 with tab_lookup:
