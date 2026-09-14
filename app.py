@@ -76,6 +76,71 @@ def highlight_spot_row(styler, df, spot, strike_col="Strike"):
     return styler.apply(_row_style, axis=1)
 
 
+def _format_cell(value, pct_15m):
+    """Value with a compact 15m-change prefix, e.g. '+14% $22,046K'.
+    Streamlit's dataframe can't render two differently-colored spans inside
+    one cell, so this folds the badge into the same text instead of a true
+    two-tone corner badge — same information, single cell, no new column."""
+    if value is None or pd.isna(value):
+        return ""
+    val_str = fmt_money(value)
+    if pct_15m is None or pd.isna(pct_15m):
+        return val_str
+    sign = "+" if pct_15m >= 0 else ""
+    return f"{sign}{pct_15m:.0f}% {val_str}"
+
+
+def render_matrix_grid(value_grid, pct_grid, spot, cmap_name="RdYlGn"):
+    """
+    value_grid/pct_grid: DataFrames, index=strike, columns=expiration date,
+    same shape. Renders strikes-as-rows x expirations-as-columns with:
+    - per-COLUMN color scaling (each expiration normalized independently),
+      so one huge number in one date doesn't wash out the color contrast
+      for every other date — this is what makes it read as a real heatmap.
+    - each cell's text prefixed with its 15m % change.
+    - the spot-price row filled white.
+    """
+    import matplotlib
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+
+    expirations = list(value_grid.columns)
+    strikes = list(value_grid.index)
+    try:
+        cmap = matplotlib.colormaps[cmap_name]  # matplotlib >= 3.7
+    except AttributeError:
+        cmap = cm.get_cmap(cmap_name)  # fallback for older matplotlib
+
+    col_vmax = {}
+    for exp in expirations:
+        v = value_grid[exp].abs().max()
+        col_vmax[exp] = v if pd.notna(v) and v > 0 else 1
+
+    text_rows, bg_rows = [], []
+    for strike in strikes:
+        trow, brow = [], []
+        for exp in expirations:
+            v = value_grid.loc[strike, exp]
+            p = pct_grid.loc[strike, exp]
+            trow.append(_format_cell(v, p))
+            if pd.isna(v):
+                brow.append("")
+            else:
+                norm = mcolors.TwoSlopeNorm(vmin=-col_vmax[exp], vcenter=0, vmax=col_vmax[exp])
+                brow.append(f"background-color: {mcolors.to_hex(cmap(norm(v)))}; color: #000000")
+        text_rows.append(trow)
+        bg_rows.append(brow)
+
+    text_df = pd.DataFrame(text_rows, columns=expirations)
+    text_df.insert(0, "Strike", strikes)
+    bg_df = pd.DataFrame(bg_rows, columns=expirations)
+    bg_df.insert(0, "Strike", [""] * len(strikes))
+
+    styler = text_df.style.apply(lambda _: bg_df, axis=None)
+    styler = highlight_spot_row(styler, text_df, spot)  # applied last so white row wins
+    return styler
+
+
 def fmt_money(x):
     if x is None or pd.isna(x):
         return ""
@@ -287,34 +352,30 @@ with tab_tracked:
             expirations = info["matrix"]["expirations"]
             metric_data = info["matrix"][metric]  # {strike: {expiration: cell}}
 
-            # Build a wide grid: rows = strike, columns = expiration date.
-            grid_rows = {}
+            # Build two aligned grids: numeric values (for color) and 15m %
+            # change (for the corner badge). Rows = strike, cols = expiration.
+            value_rows, pct_rows = {}, {}
             for strike_str, exps in metric_data.items():
                 strike = float(strike_str)
-                row = {}
+                vrow, prow = {}, {}
                 for exp in expirations:
                     cell = exps.get(exp)
                     if cell is None:
-                        row[exp] = float("nan")
+                        vrow[exp], prow[exp] = float("nan"), float("nan")
                     elif isinstance(cell, dict):
                         # Tolerate old stored shape (plain number) too, so
                         # stale repo data from before an update doesn't crash.
-                        row[exp] = _num(cell.get("value"))
+                        vrow[exp] = _num(cell.get("value"))
+                        prow[exp] = _num(cell.get("pct_15m"))
                     else:
-                        row[exp] = cell
-                grid_rows[strike] = row
+                        vrow[exp], prow[exp] = cell, float("nan")
+                value_rows[strike] = vrow
+                pct_rows[strike] = prow
 
-            grid = pd.DataFrame(grid_rows).T  # index=strike, columns=expiration
-            grid = grid.reindex(columns=expirations)
-            grid = grid.sort_index(ascending=False)
-            grid.index.name = "Strike"
-            grid = grid.reset_index()
+            value_grid = pd.DataFrame(value_rows).T.reindex(columns=expirations).sort_index(ascending=False)
+            pct_grid = pd.DataFrame(pct_rows).T.reindex(columns=expirations).sort_index(ascending=False)
 
-            vmax = grid[expirations].abs().max().max() or 1
-            styler = grid.style.background_gradient(subset=expirations, cmap="RdYlGn", vmin=-vmax, vmax=vmax)
-            styler = highlight_spot_row(styler, grid, info["spot"])  # applied last so white wins over gradient
-            styler = styler.format({e: fmt_money for e in expirations})
-
+            styler = render_matrix_grid(value_grid, pct_grid, info["spot"])
             st.dataframe(
                 styler,
                 use_container_width=True,
@@ -323,9 +384,9 @@ with tab_tracked:
             )
             st.caption(
                 "Strikes down, expirations across — scroll right for later "
-                "dates, scroll up/down for other strikes, all on one grid. "
-                "For 15m/1d % change on a single expiration, use the "
-                "Lookup tab's live view for now."
+                "dates, scroll up/down for other strikes. Small badge in "
+                "each cell is the 15-minute % change for that strike, on "
+                "that specific expiration."
             )
 
 # ============================== LOOKUP TAB ==============================
