@@ -279,21 +279,35 @@ with tab_tracked:
             st.info("No per-expiration data stored for this ticker yet (next scheduled run will add it).")
         else:
             expirations = info["matrix"]["expirations"]
-            selected_exp = st.selectbox(
-                f"Expiration ({len(expirations)} available)", expirations, key="tracked_expiration"
-            )
+            if len(expirations) > 1:
+                selected_exp = st.select_slider(
+                    f"Expiration ({len(expirations)} available) — slide to browse",
+                    options=expirations,
+                    key="tracked_expiration",
+                )
+            else:
+                selected_exp = expirations[0]
+                st.caption(f"Expiration: {selected_exp}")
 
-            metric_data = info["matrix"][metric]  # {strike: {expiration: {value, pct_15m, pct_1d}}}
+            metric_data = info["matrix"][metric]  # {strike: {expiration: cell}}
             rows = []
             for strike_str, exps in metric_data.items():
                 cell = exps.get(selected_exp)
                 if cell is None:
                     continue
+                # Tolerate the old stored shape (plain number, from before
+                # 15m/1d tracking was added) as well as the new shape
+                # ({"value":.., "pct_15m":.., "pct_1d":..}), so stale repo
+                # data from before an update doesn't crash the app.
+                if isinstance(cell, dict):
+                    value, pct15, pct1d = cell.get("value"), cell.get("pct_15m"), cell.get("pct_1d")
+                else:
+                    value, pct15, pct1d = cell, None, None
                 rows.append({
                     "Strike": float(strike_str),
-                    metric: cell["value"],
-                    "Δ 15m %": cell["pct_15m"],
-                    "Δ 1d %": cell["pct_1d"],
+                    metric: value,
+                    "Δ 15m %": pct15,
+                    "Δ 1d %": pct1d,
                 })
 
             if not rows:
