@@ -21,7 +21,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-from core import fetch_heatseeker_data, extract_nodes, extract_matrix
+from core import fetch_heatseeker_data, extract_nodes, extract_matrix, compute_gamma_summary, fetch_intraday_candles
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "latest.json")
 GITHUB_API = "https://api.github.com"
@@ -263,6 +263,70 @@ def render_heatmap(matrix, spot, title):
     st.caption("\U0001F451L = long-gamma king node · \U0001F451S = short-gamma king node")
 
 
+def render_gamma_header(nodes_dict, metric="GEX"):
+    """Net total + wall strikes, shown as a metric strip like Bullflow's
+    header (minus a flip point — see compute_gamma_summary's docstring for
+    why that's deliberately not included yet)."""
+    strikes = [float(s) for s in nodes_dict.keys()]
+    values = [v[metric] for v in nodes_dict.values()]
+    summary = compute_gamma_summary(strikes, values)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Total Net {metric}", fmt_money(summary["net_gex"]))
+    if summary["max_pos"]:
+        c2.metric(f"Max +{metric} Wall", fmt_money(summary["max_pos"][1]), f"@ ${summary['max_pos'][0]:.0f}")
+    else:
+        c2.metric(f"Max +{metric} Wall", "—")
+    if summary["max_neg"]:
+        c3.metric(f"Max -{metric} Wall", fmt_money(summary["max_neg"][1]), f"@ ${summary['max_neg'][0]:.0f}")
+    else:
+        c3.metric(f"Max -{metric} Wall", "—")
+
+
+def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10):
+    """Intraday candlestick with the biggest GEX/VEX walls drawn as
+    horizontal reference lines at their strike levels, so you can see price
+    action relative to the walls on one chart. Candles are fetched live at
+    render time (page load), not from the 15-min stored snapshots — so
+    price is closer to real-time than the GEX levels are."""
+    candles = fetch_intraday_candles(ticker)
+    if candles is None:
+        st.info(f"Couldn't fetch intraday price history for {ticker} right now.")
+        return
+
+    fig = go.Figure(data=[go.Candlestick(
+        x=candles.index, open=candles["Open"], high=candles["High"],
+        low=candles["Low"], close=candles["Close"], name=ticker,
+    )])
+
+    strikes = [float(s) for s in nodes_dict.keys()]
+    values = [v[metric] for v in nodes_dict.values()]
+    ranked = sorted(zip(strikes, values), key=lambda sv: abs(sv[1]), reverse=True)[:top_n]
+
+    for strike, val in ranked:
+        color = "#00C853" if val > 0 else "#FF3131"
+        fig.add_hline(
+            y=strike, line_dash="dot", line_color=color, opacity=0.6,
+            annotation_text=f"${strike:.0f} ({fmt_money(val)})",
+            annotation_position="right", annotation_font_size=10,
+        )
+
+    fig.add_hline(y=spot, line_dash="dash", line_color="white",
+                   annotation_text=f"Spot ${spot:.2f}", annotation_position="left")
+
+    fig.update_layout(
+        title=f"{ticker} — Intraday Price with {metric} Walls",
+        yaxis_title="Price", xaxis_rangeslider_visible=False,
+        height=550, margin=dict(l=10, r=10, t=50, b=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        f"Top {top_n} {metric} walls by size overlaid as dashed lines "
+        "(green = positive, red = negative). Price candles are fetched "
+        "fresh on page load; wall levels are from the last 15-min snapshot."
+    )
+
+
 def _gh_headers():
     token = st.secrets.get("GITHUB_TOKEN")
     if not token:
@@ -340,6 +404,11 @@ with tab_market:
                 st.subheader(display_names.get(ticker, ticker))
                 st.metric("Spot", f"${info['spot']:.2f}")
 
+                _strikes = [float(s) for s in info["nodes"].keys()]
+                _vals = [v[metric] for v in info["nodes"].values()]
+                _summary = compute_gamma_summary(_strikes, _vals)
+                st.caption(f"Net {metric}: {fmt_money(_summary['net_gex'])}")
+
                 rows = [
                     {"Strike": float(s), metric: v[metric], "Δ15m": _num(v["pct_change_15m"])}
                     for s, v in info["nodes"].items()
@@ -373,6 +442,7 @@ with tab_tracked:
 
         info = watchlist_data[selected]
         st.metric("Spot Price", f"${info['spot']:.2f}")
+        render_gamma_header(info["nodes"], metric=metric)
 
         if "matrix" not in info:
             st.info("No per-expiration data stored for this ticker yet (next scheduled run will add it).")
@@ -416,6 +486,10 @@ with tab_tracked:
                 "each cell is the 15-minute % change for that strike, on "
                 "that specific expiration."
             )
+
+        st.divider()
+        st.subheader("Price Chart with GEX Walls")
+        render_price_gex_overlay(selected, info["nodes"], info["spot"], metric=metric)
 
 # ============================== LOOKUP TAB ==============================
 with tab_lookup:
