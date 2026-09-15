@@ -145,6 +145,48 @@ def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=Fa
 
 # --- NODE EXTRACTION (new: this replaces the plotting cells) ---
 
+def compute_gamma_summary(strikes, gex_values):
+    """
+    Net GEX total and the two 'wall' strikes (max positive / max negative
+    GEX). These only need today's actual per-strike GEX, so they're
+    straightforward and reliable.
+
+    Deliberately does NOT compute a gamma flip point. A proper flip point
+    requires re-running the gamma calculation across a grid of hypothetical
+    spot prices (since gamma itself depends on distance from spot) and
+    finding where that recomputed curve crosses zero — not a simple
+    cumulative sum of today's GEX by strike, which produces misleading
+    results (this is the likely source of the $662 flip bug).
+    """
+    strikes = np.asarray(strikes, dtype=float)
+    gex_values = np.asarray(gex_values, dtype=float)
+
+    net_gex = float(np.nansum(gex_values))
+    if len(strikes) == 0 or np.all(np.isnan(gex_values)):
+        return {"net_gex": 0.0, "max_pos": None, "max_neg": None}
+
+    max_pos_idx = np.nanargmax(gex_values) if np.any(gex_values > 0) else None
+    max_neg_idx = np.nanargmin(gex_values) if np.any(gex_values < 0) else None
+    max_pos = (float(strikes[max_pos_idx]), float(gex_values[max_pos_idx])) if max_pos_idx is not None else None
+    max_neg = (float(strikes[max_neg_idx]), float(gex_values[max_neg_idx])) if max_neg_idx is not None else None
+
+    return {"net_gex": net_gex, "max_pos": max_pos, "max_neg": max_neg}
+
+
+def fetch_intraday_candles(ticker, period="1d", interval="5m"):
+    """OHLC candles for the price+GEX overlay chart. Fetched live at render
+    time (not stored), so it's as fresh as yfinance's own feed allows —
+    typically a real-time-ish delay, not true tick-level live."""
+    try:
+        tk = yf.Ticker(ticker)
+        hist = tk.history(period=period, interval=interval)
+        if hist.empty:
+            return None
+        return hist
+    except Exception:
+        return None
+
+
 def extract_nodes(df, current_price, bin_size=5, top_n=None):
     """
     Collapse the raw option chain into per-strike-bin nodes with summed
