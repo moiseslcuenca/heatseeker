@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import requests
 import streamlit as st
@@ -71,17 +72,20 @@ def gradient_style(df, cols):
 
 
 def highlight_spot_row(styler, df, spot, strike_col="Strike"):
-    """Fills the row whose strike is closest to the current spot price in
-    solid white with dark text, so it's unmistakable at a glance."""
+    """Highlights only the Strike label cell for the row closest to spot —
+    not the whole row — so the value cells keep their own gradient color
+    instead of being overwritten white."""
     if df.empty or spot is None:
         return styler
     strikes = df[strike_col].to_numpy()
     closest = strikes[abs(strikes - spot).argmin()]
 
     def _row_style(row):
+        styles = [""] * len(row)
         if row[strike_col] == closest:
-            return ["background-color: #FFFFFF; color: #000000; font-weight: bold"] * len(row)
-        return [""] * len(row)
+            idx = list(row.index).index(strike_col)
+            styles[idx] = "background-color: #FFFFFF; color: #000000; font-weight: bold; border: 2px solid #FFD700;"
+        return styles
 
     return styler.apply(_row_style, axis=1)
 
@@ -110,16 +114,18 @@ def is_monthly_opex(date_str):
     return d.weekday() == 4 and 15 <= d.day <= 21
 
 
-def render_matrix_grid(value_grid, pct_grid, spot, cmap_name="RdYlGn"):
+def render_matrix_grid_html(value_grid, pct_grid, spot, cmap_name="RdYlGn"):
     """
-    value_grid/pct_grid: DataFrames, index=strike, columns=expiration date,
-    same shape. Renders strikes-as-rows x expirations-as-columns with:
-    - per-COLUMN color scaling (each expiration normalized independently),
-      so one huge number in one date doesn't wash out the color contrast
-      for every other date — this is what makes it read as a real heatmap.
-    - each cell's text prefixed with its 15m % change.
-    - the spot-price row filled white.
-    - monthly OPEX columns (3rd Friday) get a gold border + label.
+    Same data as render_matrix_grid but rendered as a real HTML table
+    instead of a pandas Styler through st.dataframe. This is necessary for
+    two things Streamlit's native dataframe genuinely can't do:
+    - a true two-tone % change badge inside each cell (colored pill next
+      to the value, not just prefixed text in one uniform color)
+    - a king-node fill color that's visually distinct from the normal
+      red/green gradient scale, so it doesn't just blend in as "very green"
+
+    Scroll is preserved via a CSS overflow container with sticky header
+    row + sticky Strike column.
     """
     import matplotlib
     import matplotlib.cm as cm
@@ -128,45 +134,93 @@ def render_matrix_grid(value_grid, pct_grid, spot, cmap_name="RdYlGn"):
     expirations = list(value_grid.columns)
     strikes = list(value_grid.index)
     try:
-        cmap = matplotlib.colormaps[cmap_name]  # matplotlib >= 3.7
+        cmap = matplotlib.colormaps[cmap_name]
     except AttributeError:
-        cmap = cm.get_cmap(cmap_name)  # fallback for older matplotlib
+        cmap = cm.get_cmap(cmap_name)
 
     col_vmax = {}
     for exp in expirations:
         v = value_grid[exp].abs().max()
         col_vmax[exp] = v if pd.notna(v) and v > 0 else 1
 
-    opex_border = "border-left: 3px solid #FFD700; border-right: 3px solid #FFD700;"
+    # Find the single strongest long-gamma (max positive) and short-gamma
+    # (max negative) cell across the whole visible grid.
+    flat = value_grid.stack()
+    long_king = flat.idxmax() if not flat.empty and flat.max() > 0 else None
+    short_king = flat.idxmin() if not flat.empty and flat.min() < 0 else None
 
-    text_rows, bg_rows = [], []
+    strikes_arr = np.array(strikes, dtype=float)
+    closest_strike = strikes_arr[np.abs(strikes_arr - spot).argmin()] if spot is not None else None
+
+    def badge(pct):
+        if pct is None or pd.isna(pct):
+            return ""
+        cls = "badge-pos" if pct >= 0 else "badge-neg"
+        sign = "+" if pct >= 0 else ""
+        return f'<span class="badge {cls}">{sign}{pct:.0f}%</span>'
+
+    header_cells = ['<th class="strike-col">Strike</th>']
+    for exp in expirations:
+        cls = "opex-col" if is_monthly_opex(exp) else ""
+        label = f"{exp} \U0001F3AF" if is_monthly_opex(exp) else exp
+        header_cells.append(f'<th class="{cls}">{label}</th>')
+
+    body_rows = []
     for strike in strikes:
-        trow, brow = [], []
+        row_cells = []
+        strike_cls = "strike-col"
+        if closest_strike is not None and strike == closest_strike:
+            strike_cls += " spot-cell"
+        row_cells.append(f'<td class="{strike_cls}">{strike:g}</td>')
+
         for exp in expirations:
             v = value_grid.loc[strike, exp]
             p = pct_grid.loc[strike, exp]
-            trow.append(_format_cell(v, p))
-            border = opex_border if is_monthly_opex(exp) else ""
-            if pd.isna(v):
-                brow.append(border)
+            classes = []
+            style = ""
+            if is_monthly_opex(exp):
+                classes.append("opex-col")
+
+            if (strike, exp) == long_king:
+                classes.append("king-long")
+                prefix = "\U0001F451 "
+            elif (strike, exp) == short_king:
+                classes.append("king-short")
+                prefix = "\U0001F451 "
             else:
-                norm = mcolors.TwoSlopeNorm(vmin=-col_vmax[exp], vcenter=0, vmax=col_vmax[exp])
-                brow.append(f"background-color: {mcolors.to_hex(cmap(norm(v)))}; color: #000000; {border}")
-        text_rows.append(trow)
-        bg_rows.append(brow)
+                prefix = ""
+                if pd.notna(v):
+                    norm = mcolors.TwoSlopeNorm(vmin=-col_vmax[exp], vcenter=0, vmax=col_vmax[exp])
+                    style = f"background-color: {mcolors.to_hex(cmap(norm(v)))}; color: #000000;"
 
-    # Mark OPEX columns right in the header text too, since a border alone
-    # is easy to miss when scrolling a wide grid.
-    column_labels = [f"{exp} \U0001F3AF" if is_monthly_opex(exp) else exp for exp in expirations]
+            content = f"{prefix}{badge(p)} {fmt_money(v)}" if pd.notna(v) else ""
+            row_cells.append(f'<td class="{" ".join(classes)}" style="{style}">{content}</td>')
+        body_rows.append(f"<tr>{''.join(row_cells)}</tr>")
 
-    text_df = pd.DataFrame(text_rows, columns=column_labels)
-    text_df.insert(0, "Strike", strikes)
-    bg_df = pd.DataFrame(bg_rows, columns=column_labels)
-    bg_df.insert(0, "Strike", [""] * len(strikes))
-
-    styler = text_df.style.apply(lambda _: bg_df, axis=None)
-    styler = highlight_spot_row(styler, text_df, spot)  # applied last so white row wins
-    return styler
+    html = f"""
+    <style>
+    .grid-wrap {{ overflow: auto; max-height: 620px; border: 1px solid #333; border-radius: 4px; }}
+    table.gexgrid {{ border-collapse: collapse; font-family: sans-serif; font-size: 12px; white-space: nowrap; width: 100%; }}
+    .gexgrid th, .gexgrid td {{ padding: 5px 10px; text-align: right; border: 1px solid #222; }}
+    .gexgrid .strike-col {{ position: sticky; left: 0; background: #0E1117; z-index: 2; text-align: left; font-weight: bold; }}
+    .gexgrid thead th {{ position: sticky; top: 0; background: #1A1D24; z-index: 3; color: #FAFAFA; }}
+    .gexgrid thead th.strike-col {{ z-index: 4; }}
+    .badge {{ display:inline-block; font-size:9px; padding:1px 5px; border-radius:8px; margin-right:4px; font-weight:bold; }}
+    .badge-pos {{ background:#00C853; color:#000; }}
+    .badge-neg {{ background:#FF3131; color:#fff; }}
+    .king-long {{ background-color:#FFD700 !important; color:#000 !important; font-weight:bold; }}
+    .king-short {{ background-color:#E040FB !important; color:#000 !important; font-weight:bold; }}
+    .spot-cell {{ background-color:#FFFFFF !important; color:#000000 !important; font-weight:bold; border: 2px solid #FFD700 !important; }}
+    .opex-col {{ border-left: 3px solid #FFD700 !important; border-right: 3px solid #FFD700 !important; }}
+    </style>
+    <div class="grid-wrap">
+    <table class="gexgrid">
+    <thead><tr>{''.join(header_cells)}</tr></thead>
+    <tbody>{''.join(body_rows)}</tbody>
+    </table>
+    </div>
+    """
+    return html
 
 
 def fmt_money(x):
@@ -283,12 +337,17 @@ def render_gamma_header(nodes_dict, metric="GEX"):
         c3.metric(f"Max -{metric} Wall", "—")
 
 
-def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10):
+def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10, band_pct=0.05):
     """Intraday candlestick with the biggest GEX/VEX walls drawn as
     horizontal reference lines at their strike levels, so you can see price
     action relative to the walls on one chart. Candles are fetched live at
     render time (page load), not from the 15-min stored snapshots — so
-    price is closer to real-time than the GEX levels are."""
+    price is closer to real-time than the GEX levels are.
+
+    Walls are restricted to a band around spot (band_pct) and the y-axis is
+    pinned to the actual candle range — otherwise one huge-magnitude wall
+    far from spot stretches the axis and squishes the real price action
+    into a sliver, which is what was happening before this fix."""
     candles = fetch_intraday_candles(ticker)
     if candles is None:
         st.info(f"Couldn't fetch intraday price history for {ticker} right now.")
@@ -299,15 +358,28 @@ def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10):
         low=candles["Low"], close=candles["Close"], name=ticker,
     )])
 
+    # Pin the y-axis to the actual price action (candles + spot), with
+    # some padding — set BEFORE adding wall lines so they can't stretch it.
+    price_low = min(candles["Low"].min(), spot)
+    price_high = max(candles["High"].max(), spot)
+    pad = (price_high - price_low) * 0.15 or price_high * 0.01
+    y_range = [price_low - pad, price_high + pad]
+
+    # Only draw walls that are actually near spot (within band_pct), so a
+    # massive far-dated/far-strike wall doesn't dominate the ranking or
+    # clutter a chart where it's not even visible.
+    lo, hi = spot * (1 - band_pct), spot * (1 + band_pct)
     strikes = [float(s) for s in nodes_dict.keys()]
     values = [v[metric] for v in nodes_dict.values()]
-    ranked = sorted(zip(strikes, values), key=lambda sv: abs(sv[1]), reverse=True)[:top_n]
+    nearby = [(s, v) for s, v in zip(strikes, values) if lo <= s <= hi]
+    ranked = sorted(nearby, key=lambda sv: abs(sv[1]), reverse=True)[:top_n]
 
     for strike, val in ranked:
         color = "#00C853" if val > 0 else "#FF3131"
+        label = "resistance" if val > 0 else "support"
         fig.add_hline(
             y=strike, line_dash="dot", line_color=color, opacity=0.6,
-            annotation_text=f"${strike:.0f} ({fmt_money(val)})",
+            annotation_text=f"${strike:.0f} {label} ({fmt_money(val)})",
             annotation_position="right", annotation_font_size=10,
         )
 
@@ -316,7 +388,7 @@ def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10):
 
     fig.update_layout(
         title=f"{ticker} — Intraday Price with {metric} Walls",
-        yaxis_title="Price", xaxis_rangeslider_visible=False,
+        yaxis_title="Price", yaxis_range=y_range, xaxis_rangeslider_visible=False,
         height=550, margin=dict(l=10, r=10, t=50, b=10),
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -473,18 +545,14 @@ with tab_tracked:
             value_grid = pd.DataFrame(value_rows).T.reindex(columns=expirations).sort_index(ascending=False)
             pct_grid = pd.DataFrame(pct_rows).T.reindex(columns=expirations).sort_index(ascending=False)
 
-            styler = render_matrix_grid(value_grid, pct_grid, info["spot"])
-            st.dataframe(
-                styler,
-                use_container_width=True,
-                hide_index=True,
-                height=600,
-            )
+            html = render_matrix_grid_html(value_grid, pct_grid, info["spot"])
+            st.markdown(html, unsafe_allow_html=True)
             st.caption(
                 "Strikes down, expirations across — scroll right for later "
-                "dates, scroll up/down for other strikes. Small badge in "
-                "each cell is the 15-minute % change for that strike, on "
-                "that specific expiration."
+                "dates, scroll up/down for other strikes. Colored badge = "
+                "15-minute % change. Gold cell = spot's strike. Gold fill = "
+                "strongest long-gamma node, purple fill = strongest "
+                "short-gamma node, both marked with 👑."
             )
 
         st.divider()
