@@ -38,6 +38,59 @@ def calculate_charm(flag, S, K, T, r, sigma):
     return delta_tomorrow - delta_today
 
 
+_RISK_FREE_CACHE = {"rate": None, "fetched_at": None}
+
+
+def get_risk_free_rate(fallback=0.045, max_age_seconds=3600):
+    """13-week Treasury bill yield (^IRX) as a live proxy for the
+    risk-free rate, instead of a hardcoded constant. Cached for an hour
+    since it doesn't move fast enough to need refetching every call.
+    Falls back to the hardcoded default if the fetch fails for any reason
+    (e.g. no network) so this never breaks the pipeline."""
+    import time
+    now = time.time()
+    if _RISK_FREE_CACHE["rate"] is not None and _RISK_FREE_CACHE["fetched_at"] is not None:
+        if now - _RISK_FREE_CACHE["fetched_at"] < max_age_seconds:
+            return _RISK_FREE_CACHE["rate"]
+
+    try:
+        irx = yf.Ticker("^IRX")
+        last = irx.fast_info["last_price"]
+        rate = float(last) / 100.0  # ^IRX quotes in percent, e.g. 5.25 -> 0.0525
+        if 0 < rate < 0.25:  # sanity bound — reject anything nonsensical
+            _RISK_FREE_CACHE["rate"] = rate
+            _RISK_FREE_CACHE["fetched_at"] = now
+            return rate
+    except Exception:
+        pass
+    return fallback
+
+
+def _clean_implied_vol(chain_df):
+    """Replaces garbage/near-zero IV with a same-expiration, same-side
+    (call/put) median instead of a single arbitrary flat constant — so the
+    fallback reflects that day's actual skew/level rather than an
+    unconditional 50% guess, which is a poor assumption for e.g. a low-vol
+    blue chip. Only falls back to a flat constant if truly nothing usable
+    exists for that expiration/side (should be rare)."""
+    df = chain_df.copy()
+    bad = df["impliedVolatility"] < 0.01
+    if not bad.any():
+        return df
+
+    for (exp, side), group_idx in df.groupby(["expirationDate", "type"]).groups.items():
+        group_bad = bad.loc[group_idx]
+        if not group_bad.any():
+            continue
+        good_vals = df.loc[group_idx, "impliedVolatility"][~group_bad]
+        if len(good_vals) > 0:
+            replacement = good_vals.median()
+        else:
+            replacement = 0.3  # last-resort constant, only if the whole expiration/side is unusable
+        df.loc[group_idx[group_bad], "impliedVolatility"] = replacement
+    return df
+
+
 def get_greeks(row, spot_price, risk_free_rate=0.045):
     try:
         T = row["days_to_expiration"] / 365.0
@@ -121,11 +174,9 @@ def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=Fa
             puts["type"] = "put"
             chain = pd.concat([calls, puts]).fillna(0)
 
-            mask_zero = chain["impliedVolatility"] < 0.01
-            if mask_zero.any():
-                chain.loc[mask_zero, "impliedVolatility"] = 0.5
-
             chain["expirationDate"] = date
+            chain = _clean_implied_vol(chain)
+
             days = (datetime.strptime(date, "%Y-%m-%d") - datetime.now()).days
             chain["days_to_expiration"] = max(days, 0.5)
             chain["T_precise"] = chain["days_to_expiration"] / 365.0
@@ -138,7 +189,8 @@ def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=Fa
     df = pd.concat(all_options)
     if verbose:
         print("Calculating GEX, VEX, DEX, CHARM...")
-    greeks = df.apply(get_greeks, axis=1, spot_price=current_price)
+    risk_free_rate = get_risk_free_rate()
+    greeks = df.apply(get_greeks, axis=1, spot_price=current_price, risk_free_rate=risk_free_rate)
     df[["GEX", "VEX", "DEX", "CHARM"]] = greeks
     return df, current_price
 
