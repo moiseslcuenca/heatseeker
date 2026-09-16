@@ -70,24 +70,26 @@ def _clean_implied_vol(chain_df):
     """Replaces garbage/near-zero IV with a same-expiration, same-side
     (call/put) median instead of a single arbitrary flat constant — so the
     fallback reflects that day's actual skew/level rather than an
-    unconditional 50% guess, which is a poor assumption for e.g. a low-vol
-    blue chip. Only falls back to a flat constant if truly nothing usable
-    exists for that expiration/side (should be rare)."""
+    unconditional 50% guess. Only falls back to a flat constant if truly
+    nothing usable exists for that expiration/side (should be rare).
+
+    Uses groupby().transform() rather than label-based .loc[group_idx, ...]
+    indexing — the incoming chain (calls + puts concatenated without
+    ignore_index) always has DUPLICATE index labels (0,1,2... from calls,
+    then 0,1,2... again from puts), which breaks label-based .loc lookups.
+    transform() aligns by position within each group instead, so it's safe
+    regardless of duplicate labels."""
     df = chain_df.copy()
     bad = df["impliedVolatility"] < 0.01
     if not bad.any():
         return df
 
-    for (exp, side), group_idx in df.groupby(["expirationDate", "type"]).groups.items():
-        group_bad = bad.loc[group_idx]
-        if not group_bad.any():
-            continue
-        good_vals = df.loc[group_idx, "impliedVolatility"][~group_bad]
-        if len(good_vals) > 0:
-            replacement = good_vals.median()
-        else:
-            replacement = 0.3  # last-resort constant, only if the whole expiration/side is unusable
-        df.loc[group_idx[group_bad], "impliedVolatility"] = replacement
+    def _replacement(s):
+        good = s[s >= 0.01]
+        return good.median() if len(good) > 0 else 0.3
+
+    group_replacement = df.groupby(["expirationDate", "type"])["impliedVolatility"].transform(_replacement)
+    df.loc[bad, "impliedVolatility"] = group_replacement[bad]
     return df
 
 
