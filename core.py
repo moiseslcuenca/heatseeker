@@ -107,7 +107,12 @@ def get_greeks(row, spot_price, risk_free_rate=0.045):
         d = delta(flag, spot_price, K, T, risk_free_rate, sigma)
         c = calculate_charm(flag, spot_price, K, T, risk_free_rate, sigma)
 
-        dollar_gamma = g * spot_price * oi * multiplier
+        # Standard SpotGamma-style GEX convention: gamma * OI * 100 * spot^2
+        # * 0.01, representing "$ dealers must hedge per 1% move" — this is
+        # the normalized convention most public GEX tools (and very likely
+        # Bullflow) use, replacing the simpler `gamma * spot * OI * 100`
+        # linear version this app used before.
+        dollar_gamma = g * (spot_price ** 2) * 0.01 * oi * multiplier
         dollar_vanna = v * spot_price * oi * multiplier * sigma
         dollar_delta = d * spot_price * oi * multiplier
         dollar_charm = c * spot_price * oi * multiplier
