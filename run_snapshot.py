@@ -115,9 +115,14 @@ def run_group(group, entries, close_run, include_matrix=False):
 
 
 def main():
-    if not is_market_open():
+    is_manual_trigger = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+
+    if not is_manual_trigger and not is_market_open():
         print("Market closed. Skipping run.")
         return
+
+    if is_manual_trigger and not is_market_open():
+        print("Market closed, but this was a MANUAL trigger — running anyway for testing/diagnostics.")
 
     close_run = is_last_run_of_day()
     config = load_config()
