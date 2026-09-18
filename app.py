@@ -601,7 +601,16 @@ with tab_lookup:
         st.metric("Spot Price", f"${result['spot']:.2f}")
 
         matrix = extract_matrix(result["df_raw"], result["spot"], mode="GEX", bin_size=result["bin_size"])
-        render_heatmap(matrix, result["spot"], f"{result['ticker']} — GEX by strike & expiration")
+        empty_pct = pd.DataFrame(float("nan"), index=matrix.index, columns=matrix.columns)
+        html = render_matrix_grid_html(matrix, empty_pct, result["spot"])
+        st.markdown(html, unsafe_allow_html=True)
+        st.caption(
+            "Strikes down, expirations across — scroll right for later dates, "
+            "scroll up/down for other strikes. No 15m badge here (live "
+            "one-off lookup, nothing to compare against yet). Gold cell = "
+            "spot's strike. Gold fill = strongest long-gamma node, purple "
+            "fill = strongest short-gamma node, both marked with 👑."
+        )
 
         nodes = extract_nodes(result["df_raw"], result["spot"], bin_size=result["bin_size"])
         nodes = nodes.reset_index().rename(columns={"strike_bin": "Strike"})
