@@ -600,7 +600,10 @@ with tab_lookup:
     if result:
         st.metric("Spot Price", f"${result['spot']:.2f}")
 
-        matrix = extract_matrix(result["df_raw"], result["spot"], mode="GEX", bin_size=result["bin_size"])
+        matrix = extract_matrix(
+            result["df_raw"], result["spot"], mode="GEX", bin_size=result["bin_size"],
+            zoom_range=(result["df_raw"]["strike"].min(), result["df_raw"]["strike"].max()),
+        )
         empty_pct = pd.DataFrame(float("nan"), index=matrix.index, columns=matrix.columns)
         html = render_matrix_grid_html(matrix, empty_pct, result["spot"])
         st.markdown(html, unsafe_allow_html=True)
