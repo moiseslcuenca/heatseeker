@@ -374,12 +374,25 @@ def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10, b
     nearby = [(s, v) for s, v in zip(strikes, values) if lo <= s <= hi]
     ranked = sorted(nearby, key=lambda sv: abs(sv[1]), reverse=True)[:top_n]
 
-    for strike, val in ranked:
+    # Line thickness scales with the wall's actual size, so the biggest
+    # walls visually dominate instead of every line looking identical.
+    # Only the top few get a text label — with 10 lines all annotated,
+    # the labels overlap and Plotly silently truncates them (this is what
+    # was showing as just "$1" before: cut-off text, not a real bug in the
+    # numbers themselves).
+    max_abs = max((abs(v) for _, v in ranked), default=1) or 1
+    LABEL_COUNT = 4
+
+    for i, (strike, val) in enumerate(ranked):
         color = "#00C853" if val > 0 else "#FF3131"
         label = "resistance" if val > 0 else "support"
+        width = 1 + 7 * (abs(val) / max_abs)  # scales roughly 1px (smallest) to 8px (largest)
+
+        show_label = i < LABEL_COUNT
         fig.add_hline(
-            y=strike, line_dash="dot", line_color=color, opacity=0.6,
-            annotation_text=f"${strike:.0f} {label} ({fmt_money(val)})",
+            y=strike, line_dash="dot", line_color=color, opacity=0.7,
+            line_width=width,
+            annotation_text=f"${strike:.0f} {label}: {fmt_money(val)}" if show_label else None,
             annotation_position="right", annotation_font_size=10,
         )
 
@@ -389,7 +402,7 @@ def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10, b
     fig.update_layout(
         title=f"{ticker} — Intraday Price with {metric} Walls",
         yaxis_title="Price", yaxis_range=y_range, xaxis_rangeslider_visible=False,
-        height=550, margin=dict(l=10, r=10, t=50, b=10),
+        height=550, margin=dict(l=10, r=160, t=50, b=10),
     )
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
