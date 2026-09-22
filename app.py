@@ -23,6 +23,7 @@ import requests
 import streamlit as st
 
 from core import fetch_heatseeker_data, extract_nodes, extract_matrix, compute_gamma_summary, fetch_intraday_candles
+from market_hours import is_market_open
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "latest.json")
 GITHUB_API = "https://api.github.com"
@@ -424,12 +425,17 @@ def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10, b
     )
 
 
-def build_gamma_summary_prompt(ticker, spot, nodes_dict, metric="GEX", top_n=6):
+def build_gamma_summary_prompt(ticker, spot, nodes_dict, metric="GEX", top_n=6, market_open=True):
     """Builds a compact, fact-only text summary of the current snapshot for
     Gemini to narrate. Every number in this prompt comes straight from the
     stored data — the model is explicitly told not to invent or estimate
     anything beyond what's given, so it's narrating real numbers rather
-    than guessing plausible-sounding ones."""
+    than guessing plausible-sounding ones.
+
+    market_open: when False (after-hours or pre-market), the framing
+    instruction shifts from "describe current action" to "describe this as
+    context heading into the next session" — otherwise the read reads like
+    it's narrating live action when the market's actually closed."""
     strikes = [float(s) for s in nodes_dict.keys()]
     values = [v[metric] for v in nodes_dict.values()]
     summary = compute_gamma_summary(strikes, values)
@@ -441,6 +447,17 @@ def build_gamma_summary_prompt(ticker, spot, nodes_dict, metric="GEX", top_n=6):
     max_pos = f"${summary['max_pos'][0]:.0f} ({fmt_money(summary['max_pos'][1])})" if summary["max_pos"] else "none"
     max_neg = f"${summary['max_neg'][0]:.0f} ({fmt_money(summary['max_neg'][1])})" if summary["max_neg"] else "none"
 
+    if market_open:
+        framing = "Write a short (3-4 sentence) plain-English trading-desk-style read of this setup, as it stands right now during the trading session."
+    else:
+        framing = (
+            "The market is currently CLOSED (after-hours or pre-market). This data is "
+            "from the last available snapshot, not live. Write a short (3-4 sentence) "
+            "plain-English read framed explicitly as context heading into the NEXT "
+            "trading session — e.g. \"heading into the next session, watch for...\" — "
+            "do not describe this as current/live action, since the market isn't open."
+        )
+
     return f"""You are reading options {metric} (gamma exposure) data for {ticker}.
 Current spot price: ${spot:.2f}
 Total net {metric}: {net_str}
@@ -450,7 +467,7 @@ Strongest negative (short-gamma / support-leaning) wall: {max_neg}
 Top {top_n} strikes by magnitude:
 {wall_lines}
 
-Write a short (3-4 sentence) plain-English trading-desk-style read of this setup.
+{framing}
 Cover: whether the overall positioning is net long or short gamma and what
 that implies for volatility (dampened/choppy vs amplified/trending), and
 where the nearest significant resistance and support walls are relative to
@@ -649,15 +666,25 @@ with tab_tracked:
 
         st.divider()
         st.subheader("🤖 AI Read")
-        if st.button("Get AI Read", key="gemini_read_button"):
+        market_currently_open = is_market_open()
+        button_label = "Get AI Read" if market_currently_open else "Get AI Read (next-session preview)"
+
+        if st.button(button_label, key="gemini_read_button"):
             with st.spinner("Asking Gemini..."):
                 try:
-                    prompt = build_gamma_summary_prompt(selected, info["spot"], info["nodes"], metric=metric)
+                    prompt = build_gamma_summary_prompt(
+                        selected, info["spot"], info["nodes"], metric=metric, market_open=market_currently_open
+                    )
                     ok, result = call_gemini(prompt)
                 except Exception as e:
                     ok, result = False, f"Unexpected error building/sending the request: {e}"
             if ok:
-                st.success(result)
+                # Streamlit renders this through Markdown, which treats a
+                # pair of $ signs as LaTeX math mode — since the response
+                # is full of dollar amounts, that was silently mangling the
+                # text (squished spacing, garbled math rendering). Escaping
+                # every $ makes it display as plain literal text instead.
+                st.success(result.replace("$", "\\$"))
             else:
                 st.error(result)
         st.caption(
