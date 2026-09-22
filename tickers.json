@@ -1,14 +1,46 @@
 {
   "market": [
-    {"ticker": "^SPX", "bin_size": 5, "mode": "today"},
-    {"ticker": "SPY", "bin_size": 1, "mode": "today"},
-    {"ticker": "QQQ", "bin_size": 1, "mode": "today"}
+    {
+      "ticker": "^SPX",
+      "bin_size": 5,
+      "mode": "today"
+    },
+    {
+      "ticker": "SPY",
+      "bin_size": 1,
+      "mode": "today"
+    },
+    {
+      "ticker": "QQQ",
+      "bin_size": 1,
+      "mode": "today"
+    }
   ],
   "watchlist": [
-    {"ticker": "SPY", "bin_size": 1, "mode": "all"},
-    {"ticker": "QQQ", "bin_size": 1, "mode": "all"},
-    {"ticker": "CRWV", "bin_size": 1, "mode": "all"},
-    {"ticker": "NBIS", "bin_size": 2, "mode": "all"}
-
+    {
+      "ticker": "SPY",
+      "bin_size": 1,
+      "mode": "all"
+    },
+    {
+      "ticker": "QQQ",
+      "bin_size": 1,
+      "mode": "all"
+    },
+    {
+      "ticker": "CRWV",
+      "bin_size": 1,
+      "mode": "all"
+    },
+    {
+      "ticker": "NBIS",
+      "bin_size": 2,
+      "mode": "all"
+    },
+    {
+      "ticker": "WOLF",
+      "bin_size": 1.0,
+      "mode": "weekly"
+    }
   ]
 }
