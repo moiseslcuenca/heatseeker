@@ -26,6 +26,7 @@ from core import fetch_heatseeker_data, extract_nodes, extract_matrix, compute_g
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "latest.json")
 GITHUB_API = "https://api.github.com"
+GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 st.set_page_config(page_title="HeatSeeker", layout="wide")
 st.title("🎯 HeatSeeker Node Tracker")
@@ -389,12 +390,23 @@ def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10, b
         width = 1 + 7 * (abs(val) / max_abs)  # scales roughly 1px (smallest) to 8px (largest)
 
         show_label = i < LABEL_COUNT
-        fig.add_hline(
-            y=strike, line_dash="dot", line_color=color, opacity=0.7,
-            line_width=width,
-            annotation_text=f"${strike:.0f} {label}: {fmt_money(val)}" if show_label else None,
-            annotation_position="right", annotation_font_size=10,
-        )
+        if show_label:
+            fig.add_hline(
+                y=strike, line_dash="solid", line_color=color, opacity=0.7,
+                line_width=width,
+                annotation_text=f"${strike:.0f} {label}: {fmt_money(val)}",
+                annotation_position="right", annotation_font_size=10,
+            )
+        else:
+            # No annotation kwargs at all here — passing annotation_text=None
+            # with annotation_position still set doesn't suppress the label
+            # the way you'd expect; Plotly falls back to a literal "new
+            # text" placeholder instead of showing nothing. Omitting the
+            # annotation arguments entirely is what actually shows no label.
+            fig.add_hline(
+                y=strike, line_dash="solid", line_color=color, opacity=0.7,
+                line_width=width,
+            )
 
     fig.add_hline(y=spot, line_dash="dash", line_color="white",
                    annotation_text=f"Spot ${spot:.2f}", annotation_position="left")
@@ -410,6 +422,69 @@ def render_price_gex_overlay(ticker, nodes_dict, spot, metric="GEX", top_n=10, b
         "(green = positive, red = negative). Price candles are fetched "
         "fresh on page load; wall levels are from the last 15-min snapshot."
     )
+
+
+def build_gamma_summary_prompt(ticker, spot, nodes_dict, metric="GEX", top_n=6):
+    """Builds a compact, fact-only text summary of the current snapshot for
+    Gemini to narrate. Every number in this prompt comes straight from the
+    stored data — the model is explicitly told not to invent or estimate
+    anything beyond what's given, so it's narrating real numbers rather
+    than guessing plausible-sounding ones."""
+    strikes = [float(s) for s in nodes_dict.keys()]
+    values = [v[metric] for v in nodes_dict.values()]
+    summary = compute_gamma_summary(strikes, values)
+
+    ranked = sorted(zip(strikes, values), key=lambda sv: abs(sv[1]), reverse=True)[:top_n]
+    wall_lines = "\n".join(f"  - ${s:.0f}: {fmt_money(v)}" for s, v in ranked)
+
+    net_str = fmt_money(summary["net_gex"])
+    max_pos = f"${summary['max_pos'][0]:.0f} ({fmt_money(summary['max_pos'][1])})" if summary["max_pos"] else "none"
+    max_neg = f"${summary['max_neg'][0]:.0f} ({fmt_money(summary['max_neg'][1])})" if summary["max_neg"] else "none"
+
+    return f"""You are reading options {metric} (gamma exposure) data for {ticker}.
+Current spot price: ${spot:.2f}
+Total net {metric}: {net_str}
+Strongest positive (long-gamma / resistance-leaning) wall: {max_pos}
+Strongest negative (short-gamma / support-leaning) wall: {max_neg}
+
+Top {top_n} strikes by magnitude:
+{wall_lines}
+
+Write a short (3-4 sentence) plain-English trading-desk-style read of this setup.
+Cover: whether the overall positioning is net long or short gamma and what
+that implies for volatility (dampened/choppy vs amplified/trending), and
+where the nearest significant resistance and support walls are relative to
+spot. Use ONLY the numbers given above — do not invent, estimate, or recall
+any figure not explicitly provided. If you're unsure of something, say so
+rather than guessing."""
+
+
+def call_gemini(prompt, timeout=20):
+    """Returns (success: bool, text_or_error: str). Never raises — any
+    failure (missing key, network issue, bad response shape, rate limit)
+    comes back as a clean message instead of crashing the app."""
+    api_key = st.secrets.get("GEMINI_API_KEY")
+    if not api_key:
+        return False, "GEMINI_API_KEY not set in Streamlit secrets."
+
+    try:
+        r = requests.post(
+            f"{GEMINI_API}?key={api_key}",
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        return False, f"Network error calling Gemini: {e}"
+
+    if r.status_code != 200:
+        return False, f"Gemini API error ({r.status_code}): {r.text[:300]}"
+
+    try:
+        data = r.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return True, text.strip()
+    except (KeyError, IndexError, TypeError):
+        return False, f"Unexpected response shape from Gemini: {str(r.json())[:300]}"
 
 
 def _gh_headers():
@@ -571,6 +646,26 @@ with tab_tracked:
         st.divider()
         st.subheader("Price Chart with GEX Walls")
         render_price_gex_overlay(selected, info["nodes"], info["spot"], metric=metric)
+
+        st.divider()
+        st.subheader("🤖 AI Read")
+        if st.button("Get AI Read", key="gemini_read_button"):
+            with st.spinner("Asking Gemini..."):
+                try:
+                    prompt = build_gamma_summary_prompt(selected, info["spot"], info["nodes"], metric=metric)
+                    ok, result = call_gemini(prompt)
+                except Exception as e:
+                    ok, result = False, f"Unexpected error building/sending the request: {e}"
+            if ok:
+                st.success(result)
+            else:
+                st.error(result)
+        st.caption(
+            "Reads the last stored snapshot (same data as the grid above), "
+            "not a live fetch — if the market's closed, this describes the "
+            "last available close. Only the exact numbers already shown in "
+            "this app are given to the model; nothing is invented."
+        )
 
 # ============================== LOOKUP TAB ==============================
 with tab_lookup:
