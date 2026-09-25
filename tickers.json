@@ -46,6 +46,11 @@
       "ticker": "APP",
       "bin_size": 1.0,
       "mode": "weekly"
+    },
+    {
+      "ticker": "AVGO",
+      "bin_size": 1.0,
+      "mode": "weekly"
     }
   ]
 }
