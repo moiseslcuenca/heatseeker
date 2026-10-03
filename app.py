@@ -22,7 +22,8 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-from core import fetch_heatseeker_data, extract_nodes, extract_matrix, compute_gamma_summary, fetch_intraday_candles
+from core import (fetch_heatseeker_data, fetch_heatseeker_data_diag, extract_nodes,
+                  extract_matrix, compute_gamma_summary, fetch_intraday_candles)
 from market_hours import is_market_open
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "latest.json")
@@ -713,15 +714,13 @@ with tab_lookup:
     if st.button("Fetch", type="primary") and ticker_input:
         with st.spinner(f"Fetching live option chain for {ticker_input}..."):
             try:
-                df_raw, spot = fetch_heatseeker_data(ticker_input, mode=mode, max_expirations=max_exp)
+                df_raw, spot, err = fetch_heatseeker_data_diag(ticker_input, mode=mode, max_expirations=max_exp)
             except Exception as e:
-                st.session_state["lookup_result"] = None
-                st.error(f"Error fetching {ticker_input}: {e}")
-                df_raw, spot = None, None
+                df_raw, spot, err = None, None, f"Unexpected error: {type(e).__name__}: {e}"
 
         if df_raw is None:
             st.session_state["lookup_result"] = None
-            st.error(f"No data found for '{ticker_input}'. Check the symbol.")
+            st.error(f"Couldn't load {ticker_input}: {err}")
         else:
             st.session_state["lookup_result"] = {
                 "ticker": ticker_input,
