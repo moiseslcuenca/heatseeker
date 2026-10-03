@@ -127,31 +127,74 @@ def get_greeks(row, spot_price, risk_free_rate=0.045):
         return pd.Series([0, 0, 0, 0])
 
 
-# --- DATA ENGINE (unchanged logic, print -> logging optional) ---
+# --- DATA ENGINE ---
 
-def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=False):
+def _describe_error(e):
+    """Turns an exception into a short, human-readable reason. Rate-limit
+    style failures (HTTP 429 / 'Too Many Requests') are called out
+    explicitly since that's the leading suspect for the morning lookup
+    outage; everything else keeps its exception type + message so the real
+    cause is visible instead of being swallowed."""
+    text = f"{type(e).__name__}: {e}"
+    low = text.lower()
+    if "429" in low or "too many requests" in low or "rate limit" in low or "ratelimit" in low:
+        return f"Rate limited by Yahoo ({text[:200]})"
+    return text[:300]
+
+
+def _get_price(tk):
+    """Returns (price, error). fast_info can return None/NaN instead of
+    raising, which the old code let through as a 'valid' price, so both
+    cases are checked here."""
+    problems = []
+    try:
+        p = tk.fast_info["last_price"]
+        if p is not None and np.isfinite(float(p)) and float(p) > 0:
+            return float(p), None
+        problems.append("fast_info returned no usable price")
+    except Exception as e:
+        problems.append(f"fast_info failed: {_describe_error(e)}")
+
+    try:
+        hist = tk.history(period="1d")
+        if hist is None or hist.empty:
+            problems.append("history returned no rows")
+        else:
+            p = float(hist["Close"].iloc[-1])
+            if np.isfinite(p) and p > 0:
+                return p, None
+            problems.append("history close was not a usable price")
+    except Exception as e:
+        problems.append(f"history failed: {_describe_error(e)}")
+
+    return None, "Couldn't get a price (" + "; ".join(problems) + ")"
+
+
+def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbose=False):
     """
+    Same job as fetch_heatseeker_data, but returns (df, price, error).
+    On success error is None. On failure df and price are None and error is
+    a human-readable reason (price failed / no expirations / rate limited /
+    every chain failed + first exception text).
+
     max_expirations: cap on how many expiration dates to pull.
     None = no cap (pull everything available for the mode).
     """
     tk = yf.Ticker(ticker)
-    try:
-        current_price = tk.fast_info["last_price"]
-    except Exception:
-        try:
-            current_price = tk.history(period="1d")["Close"].iloc[-1]
-        except Exception:
-            return None, None
+
+    current_price, price_err = _get_price(tk)
+    if current_price is None:
+        return None, None, price_err
 
     if verbose:
         print(f"Fetching {ticker} (price: ${current_price:.2f})...")
 
     try:
         expirations = tk.options
-    except Exception:
-        return None, None
+    except Exception as e:
+        return None, None, f"Couldn't list option expirations: {_describe_error(e)}"
     if not expirations:
-        return None, None
+        return None, None, f"No listed option expirations for '{ticker}' (no options, or Yahoo returned none)."
 
     target_expirations = []
     if mode == "daily":
@@ -170,10 +213,13 @@ def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=Fa
         target_expirations = expirations[:1]
 
     all_options = []
+    chain_errors = []  # (date, reason) for expirations that raised
+    empty_chains = 0
     for date in target_expirations:
         try:
             opt = tk.option_chain(date)
             if opt.calls.empty and opt.puts.empty:
+                empty_chains += 1
                 continue
             calls = opt.calls.copy()
             calls["type"] = "call"
@@ -188,18 +234,37 @@ def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=Fa
             chain["days_to_expiration"] = max(days, 0.5)
             chain["T_precise"] = chain["days_to_expiration"] / 365.0
             all_options.append(chain)
-        except Exception:
+        except Exception as e:
+            chain_errors.append((date, _describe_error(e)))
             continue
 
     if not all_options:
-        return None, None
+        n = len(target_expirations)
+        if chain_errors:
+            return None, None, (
+                f"All {n} option chain request(s) failed or came back empty "
+                f"({len(chain_errors)} errored, {empty_chains} empty). "
+                f"First error ({chain_errors[0][0]}): {chain_errors[0][1]}"
+            )
+        return None, None, f"All {n} option chain(s) came back empty."
+
     df = pd.concat(all_options)
     if verbose:
         print("Calculating GEX, VEX, DEX, CHARM...")
     risk_free_rate = get_risk_free_rate()
     greeks = df.apply(get_greeks, axis=1, spot_price=current_price, risk_free_rate=risk_free_rate)
     df[["GEX", "VEX", "DEX", "CHARM"]] = greeks
-    return df, current_price
+    return df, current_price, None
+
+
+def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=False):
+    """Backward-compatible wrapper: same (df, price) return as before, so
+    run_snapshot.py and any other caller keep working unchanged. The
+    failure reason is printed to the log instead of being discarded."""
+    df, price, err = fetch_heatseeker_data_diag(ticker, mode, max_expirations, verbose)
+    if err:
+        print(f"   fetch failed for {ticker}: {err}")
+    return df, price
 
 
 # --- NODE EXTRACTION (new: this replaces the plotting cells) ---
