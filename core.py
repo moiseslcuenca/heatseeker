@@ -297,18 +297,82 @@ def compute_gamma_summary(strikes, gex_values):
     return {"net_gex": net_gex, "max_pos": max_pos, "max_neg": max_neg}
 
 
+_CANDLE_CACHE = {}  # (ticker, period, interval) -> (fetched_at, DataFrame)
+_CANDLE_TTL_SECONDS = 30
+
+
 def fetch_intraday_candles(ticker, period="1d", interval="5m"):
     """OHLC candles for the price+GEX overlay chart. Fetched live at render
     time (not stored), so it's as fresh as yfinance's own feed allows —
-    typically a real-time-ish delay, not true tick-level live."""
+    typically a real-time-ish delay, not true tick-level live.
+
+    Successful results are cached for 30s (shared by every viewer of the
+    app) so a chart that auto-refreshes doesn't multiply Yahoo requests.
+    Failures are never cached."""
+    import time
+    key = (ticker, period, interval)
+    now = time.time()
+    hit = _CANDLE_CACHE.get(key)
+    if hit and now - hit[0] < _CANDLE_TTL_SECONDS:
+        return hit[1]
     try:
         tk = yf.Ticker(ticker)
         hist = tk.history(period=period, interval=interval)
         if hist.empty:
             return None
+        _CANDLE_CACHE[key] = (now, hist)
         return hist
     except Exception:
         return None
+
+
+# --- LIVE QUOTE (for the auto-refreshing spot price in the UI) ---
+
+import threading as _threading
+
+_QUOTE_CACHE = {}  # ticker -> (fetched_at, quote_dict)
+_QUOTE_LOCK = _threading.Lock()
+_QUOTE_FAIL_TTL_SECONDS = 5  # failures are retried sooner than successes expire
+
+
+def fetch_live_quote(ticker, max_age_seconds=10):
+    """
+    Latest price (and previous close, for a day-change figure) for one
+    ticker. Returns {"price": float|None, "prev_close": float|None,
+    "error": str|None, "fetched_at": epoch seconds}.
+
+    Cached per ticker in module memory, which Streamlit shares across all
+    viewer sessions, so N open browsers still cost at most one Yahoo call
+    per ticker per max_age_seconds. The lock stops several sessions that
+    refresh at the same instant from all hitting Yahoo at once. Never
+    raises.
+    """
+    import time
+    with _QUOTE_LOCK:
+        now = time.time()
+        hit = _QUOTE_CACHE.get(ticker)
+        if hit:
+            ttl = max_age_seconds if hit[1]["price"] is not None else min(max_age_seconds, _QUOTE_FAIL_TTL_SECONDS)
+            if now - hit[0] < ttl:
+                return hit[1]
+
+        try:
+            tk = yf.Ticker(ticker)
+            price, err = _get_price(tk)
+            prev_close = None
+            if price is not None:
+                try:
+                    pc = tk.fast_info["previous_close"]
+                    if pc is not None and np.isfinite(float(pc)) and float(pc) > 0:
+                        prev_close = float(pc)
+                except Exception:
+                    pass
+            quote = {"price": price, "prev_close": prev_close, "error": err, "fetched_at": now}
+        except Exception as e:
+            quote = {"price": None, "prev_close": None, "error": _describe_error(e), "fetched_at": now}
+
+        _QUOTE_CACHE[ticker] = (now, quote)
+        return quote
 
 
 def extract_nodes(df, current_price, bin_size=5, top_n=None):
