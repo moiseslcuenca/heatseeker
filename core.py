@@ -170,6 +170,55 @@ def _get_price(tk):
     return None, "Couldn't get a price (" + "; ".join(problems) + ")"
 
 
+def _peek_yahoo_options_error(tk, ticker):
+    """yfinance does NOT raise when Yahoo answers the options request with
+    an error payload (bad crumb, throttling...): it silently yields an empty
+    expiration list. This re-reads the raw response to recover Yahoo's own
+    error text. Uses a private yfinance attribute, so it's best-effort and
+    returns None if anything about it fails."""
+    try:
+        r = tk._data.get(url=f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}").json()
+        for path in (("optionChain", "error"), ("finance", "error")):
+            node = r
+            for k in path:
+                node = node.get(k) if isinstance(node, dict) else None
+            if node:
+                if isinstance(node, dict):
+                    return f"{node.get('code', '')}: {node.get('description', '')}".strip(": ")
+                return str(node)
+        res = (r.get("optionChain") or {}).get("result")
+        if not res:
+            return "Yahoo returned an options response with no result"
+    except Exception as e:
+        return f"raw check failed: {_describe_error(e)}"
+    return None
+
+
+def _list_expirations(ticker, tk, attempts=3, base_delay=1.0):
+    """Returns (tk, expirations, error). Retries when the list comes back
+    empty or raises (with a brand-new Ticker each time, so a stale
+    cookie/crumb isn't reused), backing off 1s, 2s. A ticker with genuinely
+    no options pays ~3s once; a transient Yahoo rejection usually clears."""
+    import time
+    last = None
+    for i in range(attempts):
+        if i > 0:
+            time.sleep(base_delay * (2 ** (i - 1)))
+            tk = yf.Ticker(ticker)
+        try:
+            exps = tk.options
+            if exps:
+                return tk, exps, None
+            last = _peek_yahoo_options_error(tk, ticker)
+        except Exception as e:
+            last = _describe_error(e)
+    detail = f" Yahoo said: {last}." if last else ""
+    return tk, None, (
+        f"No option expirations for '{ticker}' after {attempts} attempts.{detail} "
+        f"(Either the symbol has no listed options, or Yahoo rejected the request.)"
+    )
+
+
 def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbose=False):
     """
     Same job as fetch_heatseeker_data, but returns (df, price, error).
@@ -189,12 +238,9 @@ def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbo
     if verbose:
         print(f"Fetching {ticker} (price: ${current_price:.2f})...")
 
-    try:
-        expirations = tk.options
-    except Exception as e:
-        return None, None, f"Couldn't list option expirations: {_describe_error(e)}"
-    if not expirations:
-        return None, None, f"No listed option expirations for '{ticker}' (no options, or Yahoo returned none)."
+    tk, expirations, exp_err = _list_expirations(ticker, tk)
+    if exp_err:
+        return None, None, exp_err
 
     target_expirations = []
     if mode == "daily":
