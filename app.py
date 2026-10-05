@@ -25,6 +25,7 @@ import streamlit as st
 from core import (fetch_heatseeker_data, fetch_heatseeker_data_diag, extract_nodes,
                   extract_matrix, compute_gamma_summary, fetch_intraday_candles)
 from market_hours import is_market_open
+from live_ui import render_live_spot, render_live_chart
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "latest.json")
 GITHUB_API = "https://api.github.com"
@@ -580,7 +581,7 @@ with tab_market:
             with col:
                 info = market_data[ticker]
                 st.subheader(display_names.get(ticker, ticker))
-                st.metric("Spot", f"${info['spot']:.2f}")
+                render_live_spot(ticker, "Spot", info["spot"], key=f"market_{ticker}")
 
                 _strikes = [float(s) for s in info["nodes"].keys()]
                 _vals = [v[metric] for v in info["nodes"].values()]
@@ -619,7 +620,7 @@ with tab_tracked:
             metric = st.radio("Metric", ["GEX", "VEX"], horizontal=True, key="tracked_metric")
 
         info = watchlist_data[selected]
-        st.metric("Spot Price", f"${info['spot']:.2f}")
+        render_live_spot(selected, "Spot Price", info["spot"], key=f"tracked_{selected}")
         render_gamma_header(info["nodes"], metric=metric)
 
         if "matrix" not in info:
@@ -663,7 +664,7 @@ with tab_tracked:
 
         st.divider()
         st.subheader("Price Chart with GEX Walls")
-        render_price_gex_overlay(selected, info["nodes"], info["spot"], metric=metric)
+        render_live_chart(render_price_gex_overlay, selected, info["nodes"], info["spot"], metric)
 
         st.divider()
         st.subheader("🤖 AI Read")
