@@ -26,6 +26,7 @@ from core import (fetch_heatseeker_data, fetch_heatseeker_data_diag, extract_nod
                   extract_matrix, compute_gamma_summary, fetch_intraday_candles)
 from market_hours import is_market_open
 from live_ui import render_live_spot, render_live_chart
+from ai_read import render_ai_read_section
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "latest.json")
 GITHUB_API = "https://api.github.com"
@@ -663,37 +664,10 @@ with tab_tracked:
             )
 
         st.divider()
-        st.subheader("Price Chart with GEX Walls")
-        render_live_chart(render_price_gex_overlay, selected, info["nodes"], info["spot"], metric)
-
-        st.divider()
-        st.subheader("🤖 AI Read")
-        market_currently_open = is_market_open()
-        button_label = "Get AI Read" if market_currently_open else "Get AI Read (next-session preview)"
-
-        if st.button(button_label, key="gemini_read_button"):
-            with st.spinner("Asking Gemini..."):
-                try:
-                    prompt = build_gamma_summary_prompt(
-                        selected, info["spot"], info["nodes"], metric=metric, market_open=market_currently_open
-                    )
-                    ok, result = call_gemini(prompt)
-                except Exception as e:
-                    ok, result = False, f"Unexpected error building/sending the request: {e}"
-            if ok:
-                # Streamlit renders this through Markdown, which treats a
-                # pair of $ signs as LaTeX math mode — since the response
-                # is full of dollar amounts, that was silently mangling the
-                # text (squished spacing, garbled math rendering). Escaping
-                # every $ makes it display as plain literal text instead.
-                st.success(result.replace("$", "\\$"))
-            else:
-                st.error(result)
-        st.caption(
-            "Reads the last stored snapshot (same data as the grid above), "
-            "not a live fetch — if the market's closed, this describes the "
-            "last available close. Only the exact numbers already shown in "
-            "this app are given to the model; nothing is invented."
+        render_ai_read_section(
+            selected, info, metric, is_market_open(), call_gemini,
+            snapshot_label=(latest or {}).get("last_updated"),
+            key_prefix=f"ai_{selected}",
         )
 
 # ============================== LOOKUP TAB ==============================
