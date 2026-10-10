@@ -29,6 +29,8 @@ CONTESTED_MARGIN = 0.10
 MOVER_MIN_FRACTION = 0.10
 SWING_DAYS = 14
 TOP_NODES = 5
+FAR_KING_PCT = 5.0
+MOVERS_SHOWN = 2
 TIMEFRAMES = ("Scalp", "Day", "Swing", "Position")
 TIMEFRAME_HELP = {
     "Scalp": "Nearest expiration only.",
@@ -221,6 +223,8 @@ def build_facts(ticker, metric, timeframe, matrices, expirations, snapshot_spot,
         return min(c, key=lambda x: (x["strike"], -abs(x["value"]))) if c else None
 
     facts["floor"], facts["ceiling"] = pick_below(), pick_above()
+    facts["king_distance_pct"] = _dist(king["strike"], spot)
+    facts["king_far"] = abs(facts["king_distance_pct"]) > FAR_KING_PCT
 
     gate = None
     lo, hi = sorted((spot, king["strike"]))
@@ -284,6 +288,8 @@ def render_facts_text(f):
     ki = f["king_info"]
     k = ki["king"]
     L.append(f"KING NODE: {_node_txt(k, spot)}")
+    if f.get("king_far"):
+        L.append(f"King is more than {FAR_KING_PCT:.0f}% from spot, so the nearer floor and ceiling describe the immediate structure.")
     ru = ki["runner_up"]
     if ru is None or ki["margin"] is None:
         L.append("Contested king: NO (there is no runner-up node)")
@@ -302,22 +308,28 @@ def render_facts_text(f):
         L.append(f"Stacked king: NO (the other metric's king is ${ok['strike']:g} exp {ok['exp']})")
 
     L.append(f"Large nodes are those at least {LARGE_FRACTION*100:.0f}% of the king's size.")
-    for name, key in (("Floor (nearest large node below spot)", "floor"),
-                      ("Ceiling (nearest large node above spot)", "ceiling"),
-                      ("Gatekeeper (large node between spot and the king)", "gatekeeper")):
-        L.append(f"{name}: " + (_node_txt(f[key], spot) if f[key] else "none"))
+    def _same(a, b):
+        return a is not None and b is not None and (a["strike"], a["exp"]) == (b["strike"], b["exp"])
+
+    L.append("Floor (nearest large node below spot): " + (_node_txt(f["floor"], spot) if f["floor"] else "none"))
+    L.append("Ceiling (nearest large node above spot): " + (_node_txt(f["ceiling"], spot) if f["ceiling"] else "none"))
+    gk = f["gatekeeper"]
+    if gk is None:
+        L.append("Gatekeeper (large node between spot and the king): none")
+    elif _same(gk, f["ceiling"]):
+        L.append("Gatekeeper (large node between spot and the king): same node as the ceiling")
+    elif _same(gk, f["floor"]):
+        L.append("Gatekeeper (large node between spot and the king): same node as the floor")
+    else:
+        L.append("Gatekeeper (large node between spot and the king): " + _node_txt(gk, spot))
 
     for name, key in (("Fastest growing nodes, last 15m", "growing"), ("Fastest shrinking nodes, last 15m", "shrinking")):
         if f[key]:
             L.append(f"{name}: " + "; ".join(
-                f"${c['strike']:g} exp {c['exp']} {c['pct15']:+.0f}% (now {fmt_money(c['value'])})" for c in f[key]))
+                f"${c['strike']:g} exp {c['exp']} {c['pct15']:+.0f}% (now {fmt_money(c['value'])})" for c in f[key][:MOVERS_SHOWN]))
         else:
             L.append(f"{name}: none")
     L.append("Note on 15m changes: open interest is prior-day, so these mostly reflect repricing, not new positioning.")
-
-    L.append(f"Top {len(f['top_nodes'])} nodes by size:")
-    for c in f["top_nodes"]:
-        L.append(f"  - {_node_txt(c, spot)}")
 
     L.append("Known data limits: open interest is prior-day (not intraday); no options-flow or dark-pool data; "
              "call/put sign convention (calls positive, puts negative) is an assumption.")
