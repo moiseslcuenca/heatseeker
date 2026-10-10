@@ -7,6 +7,9 @@ Math is unchanged from the original notebook.
 """
 
 from datetime import datetime
+import re
+import threading
+import time as _time
 import warnings
 
 import numpy as np
@@ -135,6 +138,9 @@ def _describe_error(e):
     explicitly since that's the leading suspect for the morning lookup
     outage; everything else keeps its exception type + message so the real
     cause is visible instead of being swallowed."""
+    if isinstance(e, KeyError) and e.args and e.args[0] in ("calls", "puts"):
+        return ("Yahoo returned no option data for this expiration "
+                "(its session was rejected or rate limited)")
     text = f"{type(e).__name__}: {e}"
     low = text.lower()
     if "429" in low or "too many requests" in low or "rate limit" in low or "ratelimit" in low:
@@ -177,16 +183,21 @@ def _peek_yahoo_options_error(tk, ticker):
     error text. Uses a private yfinance attribute, so it's best-effort and
     returns None if anything about it fails."""
     try:
-        r = tk._data.get(url=f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}").json()
+        r = tk._data.get(url=f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}")
+        try:
+            body = r.json()
+        except Exception:
+            snippet = (getattr(r, "text", "") or "")[:120].strip()
+            return _describe_error(Exception(f"HTTP {getattr(r, 'status_code', '?')} non-JSON reply: {snippet}"))
         for path in (("optionChain", "error"), ("finance", "error")):
-            node = r
+            node = body
             for k in path:
                 node = node.get(k) if isinstance(node, dict) else None
             if node:
                 if isinstance(node, dict):
                     return f"{node.get('code', '')}: {node.get('description', '')}".strip(": ")
                 return str(node)
-        res = (r.get("optionChain") or {}).get("result")
+        res = (body.get("optionChain") or {}).get("result")
         if not res:
             return "Yahoo returned an options response with no result"
     except Exception as e:
@@ -194,16 +205,150 @@ def _peek_yahoo_options_error(tk, ticker):
     return None
 
 
-def _list_expirations(ticker, tk, attempts=3, base_delay=1.0):
-    """Returns (tk, expirations, error). Retries when the list comes back
-    empty or raises (with a brand-new Ticker each time, so a stale
-    cookie/crumb isn't reused), backing off 1s, 2s. A ticker with genuinely
-    no options pays ~3s once; a transient Yahoo rejection usually clears."""
-    import time
-    last = None
+# --- Yahoo session health -------------------------------------------------
+# yfinance keeps ONE cookie+crumb for the whole process (a singleton shared by
+# every Ticker and every Streamlit viewer). If Yahoo's crumb endpoint is rate
+# limited, yfinance (1.7.0) stores Yahoo's error text as the crumb and keeps
+# reusing it, so every options request fails with "Invalid Crumb" until the
+# process restarts. Creating a new yf.Ticker does NOT reset this; the
+# singleton has to be reset directly. Everything below is best-effort and
+# touches private yfinance attributes, so it never raises.
+
+_AUTH = {"cooldown_until": 0.0, "last_error": None}
+_AUTH_COOLDOWN_SECONDS = 60
+
+
+def _yahoo_auth():
+    try:
+        from yfinance.data import YfData
+        return YfData()
+    except Exception:
+        return None
+
+
+def _crumb_is_junk(c):
+    """A real crumb is a short token. Yahoo's error text (spaces, HTML) is not."""
+    return isinstance(c, str) and (len(c) > 40 or re.search(r"[\s<>]", c) is not None)
+
+
+def _yahoo_session_state():
+    """One-line description of yfinance's shared session, for error messages
+    (this is what will confirm or refute the 'junk crumb' diagnosis)."""
+    yd = _yahoo_auth()
+    if yd is None:
+        return "unavailable"
+    try:
+        c = getattr(yd, "_crumb", None)
+        if c is None:
+            crumb = "missing"
+        elif _crumb_is_junk(c):
+            crumb = f"JUNK {str(c)[:60]!r}"
+        else:
+            crumb = f"present (length {len(c)})"
+        return f"cookie strategy={getattr(yd, '_cookie_strategy', '?')}, crumb={crumb}"
+    except Exception:
+        return "unavailable"
+
+
+def _wipe_persisted_cookies():
+    """yfinance also keeps the Yahoo cookie in an on-disk cache and, after an
+    in-memory reset, reloads it if it hasn't 'expired'. A stale-but-unexpired
+    cookie would therefore come straight back, so it has to be deleted too."""
+    try:
+        from yfinance import cache as yc
+        cc = yc.get_cookie_cache()
+        if getattr(cc, "dummy", False):
+            return False
+        if cc.initialised == -1:
+            cc.initialise()
+        if cc.initialised != 1:
+            return False
+        yc._CookieSchema.delete().execute()
+        return True
+    except Exception:
+        return False
+
+
+def _reset_yahoo_session(toggle_strategy=False):
+    """Throw away yfinance's cached crumb, cookie (memory AND disk) so the
+    next request fetches fresh ones; optionally switch between its two
+    cookie strategies (basic <-> csrf). Returns True if a reset happened.
+    Never raises."""
+    yd = _yahoo_auth()
+    if yd is None:
+        return False
+    try:
+        lock = getattr(yd, "_cookie_lock", None)
+        if lock is not None and not lock.acquire(timeout=2):
+            return False  # another thread is mid-refresh; leave it alone
+        try:
+            yd._crumb = None
+            yd._cookie = None
+            if not getattr(yd, "_logged_in", False):
+                yd._session.cookies.clear()
+            if toggle_strategy:
+                yd._set_cookie_strategy("csrf" if yd._cookie_strategy == "basic" else "basic", have_lock=True)
+        finally:
+            if lock is not None:
+                lock.release()
+        _wipe_persisted_cookies()
+        return True
+    except Exception:
+        return False
+
+
+def _heal_junk_crumb():
+    """If the cached crumb is obviously Yahoo's error text, reset now."""
+    yd = _yahoo_auth()
+    if yd is not None and _crumb_is_junk(getattr(yd, "_crumb", None)):
+        return _reset_yahoo_session()
+    return False
+
+
+def _is_auth_error(text):
+    return bool(text) and re.search(r"crumb|unauthorized|invalid cookie|\b401\b", text, re.I) is not None
+
+
+def _auth_cooldown_remaining():
+    return max(0.0, _AUTH["cooldown_until"] - _time.time())
+
+
+def trip_auth_breaker(reason):
+    _AUTH["cooldown_until"] = _time.time() + _AUTH_COOLDOWN_SECONDS
+    _AUTH["last_error"] = reason
+
+
+def reset_auth_breaker():
+    _AUTH["cooldown_until"] = 0.0
+    _AUTH["last_error"] = None
+
+
+def _list_expirations(ticker, tk, attempts=3, base_delay=2.0):
+    """Returns (tk, expirations, error).
+
+    - A junk cached crumb is cleared before the first attempt.
+    - If Yahoo rejects the session (Invalid Crumb / Unauthorized), the shared
+      yfinance session is fully reset before the next attempt (and the cookie
+      strategy is switched before the last one), so a retry really starts fresh.
+    - If it is still rejected, a ~60s circuit breaker stops every further
+      lookup from hammering Yahoo (which keeps a rate-limited IP blocked) and
+      the user is told to wait instead.
+    - A ticker with genuinely no options just fails after the retries."""
+    wait = _auth_cooldown_remaining()
+    if wait > 0:
+        return tk, None, (
+            f"Yahoo recently rejected this server's session ({_AUTH['last_error']}). "
+            f"Pausing live lookups for another {wait:.0f}s so the block can clear; try again then. "
+            f"(This is a Yahoo/server-side block, not a problem with the symbol.)"
+        )
+
+    _heal_junk_crumb()
+    last, auth_problem = None, False
     for i in range(attempts):
         if i > 0:
-            time.sleep(base_delay * (2 ** (i - 1)))
+            if _is_auth_error(last):
+                _reset_yahoo_session(toggle_strategy=(i == attempts - 1))
+            _time.sleep(base_delay * (2 ** (i - 1)))
             tk = yf.Ticker(ticker)
         try:
             exps = tk.options
@@ -212,6 +357,16 @@ def _list_expirations(ticker, tk, attempts=3, base_delay=1.0):
             last = _peek_yahoo_options_error(tk, ticker)
         except Exception as e:
             last = _describe_error(e)
+        if _is_auth_error(last):
+            auth_problem = True
+
+    if auth_problem:
+        trip_auth_breaker(last)
+        return tk, None, (
+            f"Yahoo rejected this server's session after {attempts} attempts. Yahoo said: {last}. "
+            f"Session state: {_yahoo_session_state()}. Live lookups are paused ~{_AUTH_COOLDOWN_SECONDS}s "
+            f"to let the block clear. (This is a Yahoo/server-side block, not a problem with the symbol.)"
+        )
     detail = f" Yahoo said: {last}." if last else ""
     return tk, None, (
         f"No option expirations for '{ticker}' after {attempts} attempts.{detail} "
@@ -219,7 +374,7 @@ def _list_expirations(ticker, tk, attempts=3, base_delay=1.0):
     )
 
 
-def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbose=False):
+def _fetch_diag_uncached(ticker, mode="daily", max_expirations=None, verbose=False):
     """
     Same job as fetch_heatseeker_data, but returns (df, price, error).
     On success error is None. On failure df and price are None and error is
@@ -261,9 +416,12 @@ def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbo
     all_options = []
     chain_errors = []  # (date, reason) for expirations that raised
     empty_chains = 0
+    consecutive_errors = 0
+    stopped_early = False
     for date in target_expirations:
         try:
             opt = tk.option_chain(date)
+            consecutive_errors = 0
             if opt.calls.empty and opt.puts.empty:
                 empty_chains += 1
                 continue
@@ -282,6 +440,12 @@ def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbo
             all_options.append(chain)
         except Exception as e:
             chain_errors.append((date, _describe_error(e)))
+            consecutive_errors += 1
+            # Nothing has worked yet and 3 in a row failed: Yahoo is rejecting
+            # us, and pulling 30 more expirations would just hammer it.
+            if consecutive_errors >= 3 and not all_options:
+                stopped_early = True
+                break
             continue
 
     if not all_options:
@@ -289,7 +453,8 @@ def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbo
         if chain_errors:
             return None, None, (
                 f"All {n} option chain request(s) failed or came back empty "
-                f"({len(chain_errors)} errored, {empty_chains} empty). "
+                f"({len(chain_errors)} errored, {empty_chains} empty"
+                f"{'; stopped early after 3 failures in a row' if stopped_early else ''}). "
                 f"First error ({chain_errors[0][0]}): {chain_errors[0][1]}"
             )
         return None, None, f"All {n} option chain(s) came back empty."
@@ -301,6 +466,29 @@ def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbo
     greeks = df.apply(get_greeks, axis=1, spot_price=current_price, risk_free_rate=risk_free_rate)
     df[["GEX", "VEX", "DEX", "CHARM"]] = greeks
     return df, current_price, None
+
+
+_CHAIN_CACHE = {}  # (ticker, mode, max_expirations) -> (fetched_at, df, price)
+
+
+def fetch_heatseeker_data_diag(ticker, mode="daily", max_expirations=None, verbose=False, cache_seconds=0):
+    """Returns (df, price, error); on failure df and price are None and error
+    is a human-readable reason.
+
+    cache_seconds > 0 serves a successful result for that long, shared by
+    every viewer, so repeat lookups of the same ticker don't hit Yahoo again.
+    Failures are never cached. Default 0 keeps the scheduled job unchanged."""
+    key = (str(ticker).upper(), mode, max_expirations)
+    if cache_seconds > 0:
+        hit = _CHAIN_CACHE.get(key)
+        if hit and _time.time() - hit[0] < cache_seconds:
+            return hit[1].copy(), hit[2], None
+    df, price, err = _fetch_diag_uncached(ticker, mode, max_expirations, verbose)
+    if err is None and cache_seconds > 0:
+        if len(_CHAIN_CACHE) >= 20:
+            _CHAIN_CACHE.pop(min(_CHAIN_CACHE, key=lambda k: _CHAIN_CACHE[k][0]))
+        _CHAIN_CACHE[key] = (_time.time(), df.copy(), price)
+    return df, price, err
 
 
 def fetch_heatseeker_data(ticker, mode="daily", max_expirations=None, verbose=False):
