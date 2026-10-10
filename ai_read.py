@@ -34,17 +34,28 @@ new (no sums, differences, ratios or percentages) and do not recall any figure f
 language, not certainty. Do not simply call positive nodes resistance and negative nodes support.
 5. If the sheet says a level is "none" or there is no structure, say exactly that. An empty answer is a valid answer.
 6. If the king is contested, say it could switch between reads.
-7. Mention the snapshot time. If the market is CLOSED, frame everything as context for the next session, never as live action.
+7. Mention the snapshot time at most once, briefly (e.g. "As of 12:20 EDT"), and only if the requested format has room for it (the Brief format skips it unless the market is CLOSED). If the market is CLOSED, frame everything as context for the next session, never as live action.
+7b. If the sheet says the king is far from spot, lead with the nearer floor and ceiling instead of the king.
 8. Mention a data limit only when it matters to the point you are making (prior-day open interest, 15m changes \
 being mostly repricing, no flow data).
 9. Last line, exactly: Educational, not financial advice."""
 
 STYLES = {
-    "Concise": (
-        "Format: short labelled lines, one per item, no paragraphs. Use exactly these labels in this order, "
-        "skipping a label only if the sheet has nothing for it:\n"
-        "Snapshot / Net positioning / King / Contested / Stacked / Floor / Ceiling / Gatekeeper / Movers / "
-        "What would change this picture (structure only, e.g. the king switching or price moving through a level)."
+    "Brief": (
+        "Format: BRIEF. Write at most 4 short lines (each under 25 words), no headings, no labels:\n"
+        "1. Net positioning and what it implies (dampened vs amplified moves).\n"
+        "2. The king: where it sits versus spot, and whether it is contested.\n"
+        "3. The nearest floor and ceiling versus spot. If the gatekeeper is the same node as the floor or ceiling, "
+        "do not repeat it. Mention the stacked king only if it is YES.\n"
+        "4. Only if the sheet lists movers: the single biggest mover. Otherwise leave this line out.\n"
+        "Do not add a 'what would change' line, a snapshot-time line (unless the market is CLOSED), or data-limit notes."
+    ),
+    "Detailed": (
+        "Format: AT MOST 6 short lines (each under 30 words), each starting with a label and a colon. Use only these "
+        "labels, in this order, and skip any the sheet has nothing for:\n"
+        "Net positioning / King (say whether it is contested) / Floor and ceiling / Stacked (only if YES) / "
+        "Movers (the biggest one or two) / What would change this picture (structure only, e.g. the king switching "
+        "or price moving through a level)."
     ),
     "Prose": (
         "Format: one short paragraph of 4-6 sentences in plain English, covering net positioning, the king and "
@@ -53,8 +64,16 @@ STYLES = {
 }
 
 
-def build_prompt(facts_text, style="Concise"):
-    return f"{RULES}\n\n{STYLES.get(style, STYLES['Concise'])}\n\n{facts_text}"
+def _md(text):
+    """Make a model reply safe and readable in Streamlit Markdown: escape $ (a
+    pair of dollar signs is treated as LaTeX and mangles the text) and turn
+    single newlines into hard line breaks (Markdown otherwise collapses a
+    multi-line reply into one dense paragraph)."""
+    return text.replace("\r\n", "\n").replace("$", "\\$").replace("\n", "  \n")
+
+
+def build_prompt(facts_text, style="Brief"):
+    return f"{RULES}\n\n{STYLES.get(style, STYLES['Brief'])}\n\n{facts_text}"
 
 
 # ------------------------------------------------------ figure checker
@@ -133,8 +152,12 @@ def build_for_ticker(ticker, info, metric, timeframe, market_open, snapshot_labe
         matrices, expirations = matrices_from_nodes(info.get("nodes", {}))
     facts = build_facts(ticker, metric, timeframe, matrices, expirations, info["spot"],
                         live_spot=live_spot, snapshot_label=snapshot_label,
-                        market_open=market_open, today=today or datetime.now(ET).date())
+                        market_open=market_open, today=today or _today())
     return facts, render_facts_text(facts)
+
+
+def _today():
+    return datetime.now(ET).date()
 
 
 def _live_spot(ticker):
@@ -166,7 +189,7 @@ def render_ai_read_section(selected, info, metric, market_open, call_gemini, sna
                 text, ok, result = "", False, f"Unexpected error building/sending the request: {e}"
         if ok:
             # Escape $ so Streamlit's Markdown doesn't treat pairs as LaTeX.
-            st.success(result.replace("$", "\\$"))
+            st.success(_md(result))
             unmatched = check_figures(result, text)
             if unmatched:
                 st.warning("⚠️ These figures in the read were not found in the data sheet, so don't rely on them: "
