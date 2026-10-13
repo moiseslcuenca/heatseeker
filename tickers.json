@@ -34,11 +34,11 @@
     },
     {
       "ticker": "NBIS",
-      "bin_size": 2,
+      "bin_size": 1,
       "mode": "all"
     },
     {
-      "ticker": "WOLF",
+      "ticker": "BE",
       "bin_size": 1.0,
       "mode": "weekly"
     },
@@ -48,7 +48,7 @@
       "mode": "weekly"
     },
     {
-      "ticker": "AVGO",
+      "ticker": "ALAB",
       "bin_size": 1.0,
       "mode": "weekly"
     }
