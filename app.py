@@ -664,6 +664,7 @@ with tab_tracked:
             )
 
         st.divider()
+        render_live_chart(render_price_gex_overlay, selected, info["nodes"], info["spot"], metric)
         render_ai_read_section(
             selected, info, metric, is_market_open(), call_gemini,
             snapshot_label=(latest or {}).get("last_updated"),
