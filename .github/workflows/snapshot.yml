@@ -2,19 +2,26 @@ name: HeatSeeker Snapshot
 
 on:
   schedule:
-    # Every 15 min, 13:30-20:00 UTC (9:30am-4:00pm ET), Mon-Fri.
-    # market_hours.py double-checks holidays/exact open-close, so it's
-    # fine that this window is a bit loose.
-    - cron: "*/15 13-19 * * 1-5"
-    - cron: "0,15,30 20 * * 1-5"
-  workflow_dispatch: {}  # lets you manually trigger a run from the Actions tab to test
+    # Every 15 min at off-peak minutes (GitHub drops/delays runs that land on
+    # :00/:15/:30/:45 when its queue is busy). Window is 13:00-21:59 UTC so it
+    # covers BOTH daylight time (open 13:30 UTC) and standard time after the
+    # Nov 1 clock change (open 14:30 UTC, close 21:00 UTC). market_hours.py
+    # decides what actually runs, so a wide window is harmless.
+    - cron: "2,17,32,47 13-21 * * 1-5"
+  workflow_dispatch: {}  # manual run from the Actions tab (also used by an external trigger)
 
 permissions:
   contents: write
 
+# Never run two snapshots at once (manual + scheduled + external trigger).
+concurrency:
+  group: heatseeker-snapshot
+  cancel-in-progress: false
+
 jobs:
   snapshot:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -35,5 +42,11 @@ jobs:
           git config user.name "heatseeker-bot"
           git config user.email "actions@github.com"
           git add data
-          git diff --staged --quiet || git commit -m "Snapshot $(date -u +'%Y-%m-%d %H:%M UTC')"
+          if git diff --staged --quiet; then
+            echo "No data changes to commit."
+            exit 0
+          fi
+          git commit -m "Snapshot $(date -u +'%Y-%m-%d %H:%M UTC')"
+          # tickers.json can change on main (Add-to-watchlist button) while a run is in flight
+          git pull --rebase origin main
           git push
