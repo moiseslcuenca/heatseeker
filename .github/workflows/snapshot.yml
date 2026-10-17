@@ -8,7 +8,16 @@ on:
     # Nov 1 clock change (open 14:30 UTC, close 21:00 UTC). market_hours.py
     # decides what actually runs, so a wide window is harmless.
     - cron: "2,17,32,47 13-21 * * 1-5"
-  workflow_dispatch: {}  # manual run from the Actions tab (also used by an external trigger)
+  workflow_dispatch:
+    # Manual run from the Actions tab (leave 'source' blank: always runs, for
+    # testing) and target of the outside timer (sends source=timer: only runs
+    # inside the market windows defined in run_snapshot.py / market_hours.py).
+    inputs:
+      source:
+        description: "Leave blank for a manual test run. The outside timer sends: timer"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -35,6 +44,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run snapshot
+        env:
+          RUN_SOURCE: ${{ github.event.inputs.source }}
         run: python run_snapshot.py
 
       - name: Commit and push data
