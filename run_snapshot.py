@@ -15,6 +15,12 @@ pct_change_15m / pct_change_1d, and writes a combined latest.json shaped as:
 Storing market/SPY and watchlist/SPY separately (different folders under
 data/) lets the same ticker be tracked with different expiration scope in
 each group without the histories interfering.
+
+Who is allowed to run when:
+  - scheduled runs and dispatches sent by the outside timer (source=timer)
+    only run inside the windows below (regular session, plus the optional
+    pre-open / post-close windows) and exit immediately otherwise;
+  - a hand-clicked "Run workflow" (no source) always runs, for testing.
 """
 
 import json
@@ -25,11 +31,16 @@ from datetime import datetime, timezone
 import pytz
 
 from core import fetch_heatseeker_data, extract_nodes, extract_matrix
-from market_hours import is_market_open, is_last_run_of_day
+from market_hours import get_run_phase, is_last_run_of_day
 from snapshot import save_snapshot, save_matrix_snapshot, DATA_DIR
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tickers.json")
 ET = pytz.timezone("America/New_York")
+
+# Extra windows (besides the regular session) in which automated runs may
+# snapshot. Flip these to change behaviour; nothing else needs editing.
+ENABLE_PRE_OPEN = True      # ~15 min before the open
+ENABLE_POST_CLOSE = False   # ~15 min after the close
 
 
 def load_config():
@@ -115,14 +126,28 @@ def run_group(group, entries, close_run, include_matrix=False):
 
 
 def main():
-    is_manual_trigger = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    event = os.environ.get("GITHUB_EVENT_NAME", "")
+    source = os.environ.get("RUN_SOURCE", "").strip().lower()
+    # A hand-clicked "Run workflow" is a manual test and always runs. A
+    # dispatch that carries source=timer comes from the outside timer and is
+    # gated exactly like a scheduled run.
+    is_manual_trigger = event == "workflow_dispatch" and source != "timer"
 
-    if not is_manual_trigger and not is_market_open():
-        print("Market closed. Skipping run.")
+    phase = get_run_phase()
+    allowed = (
+        phase == "open"
+        or (phase == "pre" and ENABLE_PRE_OPEN)
+        or (phase == "post" and ENABLE_POST_CLOSE)
+    )
+
+    if not is_manual_trigger and not allowed:
+        print(f"Outside the run window (phase: {phase}). Skipping run.")
         return
 
-    if is_manual_trigger and not is_market_open():
-        print("Market closed, but this was a MANUAL trigger — running anyway for testing/diagnostics.")
+    if is_manual_trigger and not allowed:
+        print("Outside the run window, but this was a MANUAL trigger — running anyway for testing/diagnostics.")
+    elif phase in ("pre", "post"):
+        print(f"Running in the {phase}-market window.")
 
     close_run = is_last_run_of_day()
     config = load_config()
@@ -134,6 +159,17 @@ def main():
         "market": run_group("market", config.get("market", []), close_run, include_matrix=False),
         "watchlist": run_group("watchlist", config.get("watchlist", []), close_run, include_matrix=True),
     }
+
+    # The extra windows (pre-open / post-close) are more likely to hit empty
+    # Yahoo responses than the regular session. If an automated run there
+    # comes back with an empty group, keep the previous latest.json instead
+    # of blanking the app until the next run.
+    if phase in ("pre", "post") and not is_manual_trigger:
+        empty = [g for g in ("market", "watchlist") if config.get(g) and not latest[g]]
+        if empty:
+            print(f"Incomplete data in the {phase}-market window ({', '.join(empty)} came back empty). "
+                  f"Leaving latest.json as it is.")
+            return
 
     latest_path = os.path.join(DATA_DIR, "latest.json")
     with open(latest_path, "w") as f:
