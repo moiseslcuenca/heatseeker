@@ -66,6 +66,11 @@
       "ticker": "INTC",
       "bin_size": 1.0,
       "mode": "weekly"
+    },
+    {
+      "ticker": "GOOG",
+      "bin_size": 1.0,
+      "mode": "weekly"
     }
   ]
 }
