@@ -71,6 +71,11 @@
       "ticker": "GOOG",
       "bin_size": 1.0,
       "mode": "weekly"
+    },
+    {
+      "ticker": "CPRT",
+      "bin_size": 1.0,
+      "mode": "weekly"
     }
   ]
 }
